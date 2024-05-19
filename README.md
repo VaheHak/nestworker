@@ -1,13 +1,13 @@
 ![](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![](https://img.shields.io/npm/dt/funthreads.svg)
-![](https://img.shields.io/npm/l/funthreads.svg)
+![](https://img.shields.io/npm/dt/nestworker.svg)
+![](https://img.shields.io/npm/l/nestworker.svg)
 
 # nestworker
 A simple library that provides an abstraction for the Node.js `worker_threads` module. You can run your function in a dedicated thread by working with Promises.
 
 ### Example
 ```js
-const { executeInThread } = require('funthreads');
+const { executeInThread } = require('nestworker');
 
 async function calculate() {
     const values = await Promise.all([
@@ -31,19 +31,19 @@ Funthreads takes a task function as its parameter, orchestrates its execution in
 ## Installation
 
 ```shell
-$ npm i funthreads
+$ npm i nestworker
 ```
 
 ## All examples:
-- [Basic example](https://github.com/nairihar/funthreads/tree/master/examples/basic.js)
-- [Parameters for the thread task](https://github.com/nairihar/funthreads/blob/master/examples/multi-params.js)
-- [Async function inside the thread](https://github.com/nairihar/funthreads/blob/master/examples/async-task.js)
-- [Error handling](https://github.com/nairihar/funthreads/blob/master/examples/error-handling.js)
-- [Use modules inside the thread](https://github.com/nairihar/funthreads/blob/master/examples/modules-in-thread.js)
+- [Basic example](https://github.com/VaheHak/nestworker/tree/master/examples/basic.js)
+- [Parameters for the thread task](https://github.com/VaheHak/nestworker/blob/master/examples/multi-params.js)
+- [Async function inside the thread](https://github.com/VaheHak/nestworker/blob/master/examples/async-task.js)
+- [Error handling](https://github.com/VaheHak/nestworker/blob/master/examples/error-handling.js)
+- [Use modules inside the thread](https://github.com/VaheHak/nestworker/blob/master/examples/modules-in-thread.js)
 
 ## Contributing
 
-See the [contributing guide](https://github.com/nairihar/funthreads/blob/master/CONTRIBUTING.md) for detailed instructions on how to get started with our project.
+See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/CONTRIBUTING.md) for detailed instructions on how to get started with our project.
 
 ## API
 
@@ -80,7 +80,7 @@ Access to data outside of the task function is restricted. If you require the us
 In this example, we're reading a file in a separate thread and returning the data in string format. We start by defining a task function that will run within the thread, and then we prepare the necessary parameters to be passed as inputs to that function.
 
 ```javascript
-const { executeInThread } = require('funthreads');
+const { executeInThread } = require('nestworker');
 
 async function task(fileName) {
 // Closure doesn't work here
@@ -100,7 +100,7 @@ read();
 There is also another option if you don't want to use `require` inside the function.
 
 ```js
-const { executeInThread, ThreadModules } = require('funthreads');
+const { executeInThread, ThreadModules } = require('nestworker');
 
 async function task(modules) {
   // Closure doesn't work here
