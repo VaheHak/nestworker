@@ -8,12 +8,12 @@ const workerPath = path.join(__dirname, 'worker.js');
  * @param workerData - The worker data to be passed to the worker thread.
  * @returns The result of the worker thread.
  */
-export function startWorker(workerData: {
+export const startWorker = (workerData: {
   workerCode: string;
   workerParams: any[];
   workerModules: string[];
-}): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+}): Promise<any> =>
+  new Promise<void>((resolve, reject) => {
     const worker = new Worker(workerPath, {
       workerData,
     });
@@ -36,4 +36,3 @@ export function startWorker(workerData: {
       }
     });
   });
-}

@@ -12,6 +12,9 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
+# Ignore
+.npmignore
+
 # OS
 .DS_Store
 

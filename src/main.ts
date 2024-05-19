@@ -11,7 +11,7 @@ import { startWorker } from './worker/executor';
 export const executeInThread = <T>(
   task: TaskFunction<T>,
   { threadModules = [], args = [] }: ITaskOption = {},
-) => {
+): Promise<any> => {
   const params: any[] = [...args];
   const modules: string[] = [...threadModules];
 
