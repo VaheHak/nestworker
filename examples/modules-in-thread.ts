@@ -1,4 +1,4 @@
-import { executeInThread } from '../src/main';
+import { executeInThread } from 'nestworker';
 
 // this will be executed in a dedicated thread
 async function task(modules: string[]) {

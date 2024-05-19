@@ -1,0 +1,26 @@
+# Dependency directories
+node_modules
+
+# Directories
+/src
+/examples
+
+# Logs
+*.log
+
+# Documentation
+docs/
+
+# Test files
+test/
+*.spec.js
+
+# Configuration files
+.env
+.eslint*
+.prettierrc
+
+# Miscellaneous
+*.bak
+*.tmp
+*.swp
