@@ -47,7 +47,7 @@ See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/C
 
 ## API
 
-### `executeInThread(task, { args: any[] }
+### executeInThread(task, { args: any[] }
 Runs the specified function in a separate thread.
 
 #### Parameters

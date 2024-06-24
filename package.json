@@ -1,6 +1,6 @@
 {
   "name": "nestworker",
-  "version": "1.0.25",
+  "version": "1.1.0",
   "description": "A lightweight tool built on top of Node.js worker_threads, enabling multithreading.",
   "author": "Vahe Hakobyan",
   "private": false,

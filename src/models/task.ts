@@ -1,6 +1,6 @@
-export type TaskFunction<T> = (modules?: string[], args?: any[]) => T;
+export type TaskFunction<T, P = any> = (...args: P[]) => T;
 
-export interface ITaskOption {
+export interface ITaskOption<P> {
   threadModules?: string[];
-  args?: any[];
+  args?: P[];
 }

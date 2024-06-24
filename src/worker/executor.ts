@@ -8,9 +8,9 @@ const workerPath = path.join(__dirname, 'worker.js');
  * @param workerData - The worker data to be passed to the worker thread.
  * @returns The result of the worker thread.
  */
-export const startWorker = (workerData: {
+export const startWorker = <P>(workerData: {
   workerCode: string;
-  workerParams: any[];
+  workerParams: P[];
   workerModules: string[];
 }): Promise<any> =>
   new Promise<void>((resolve, reject) => {

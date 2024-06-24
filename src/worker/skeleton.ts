@@ -5,7 +5,7 @@ import { TaskFunction } from '../models';
  * @param func - The function to be executed in the worker thread.
  * @returns The generated worker code as a string.
  */
-const generateWorkerCode = (func: TaskFunction<any>) => `
+const generateWorkerCode = (func: string): string => `
   (async () => {
     const { parentPort, workerData } = await import('worker_threads');
 
@@ -18,9 +18,9 @@ const generateWorkerCode = (func: TaskFunction<any>) => `
     }
 
     try {
-      const task = ${func.toString()};
-      const res = workerData.workerModules
-        ? task(loadModules(workerData.workerModules), ...workerData.workerParams)
+      const task = ${func};
+      const res = workerData.workerModules.length > 0
+        ? task(await loadModules(workerData.workerModules), ...workerData.workerParams)
         : task(...workerData.workerParams);
       
       const data = (res instanceof Promise) ? await res : res;
@@ -38,12 +38,12 @@ const generateWorkerCode = (func: TaskFunction<any>) => `
  * @param modules - An array of module names to be loaded in the worker thread.
  * @returns A worker schema object that contains the worker code, parameters, and modules to be loaded in the worker thread.
  */
-export const createWorker = <T>(
+export const createWorker = <T, P>(
   task: TaskFunction<T>,
-  params: any[],
+  params: P[],
   modules: string[],
 ) => ({
-  workerCode: generateWorkerCode(task),
+  workerCode: generateWorkerCode(task.toString()),
   workerParams: params,
   workerModules: modules,
 });

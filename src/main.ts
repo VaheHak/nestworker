@@ -1,3 +1,4 @@
+import { deprecate } from 'node:util';
 import { ITaskOption, TaskFunction } from './models';
 import { createWorker } from './worker/skeleton';
 import { startWorker } from './worker/executor';
@@ -8,11 +9,11 @@ import { startWorker } from './worker/executor';
  * @param {ITaskOption} options - Options for the worker thread.
  * @returns The result of the task function.
  */
-export const executeInThread = <T>(
-  task: TaskFunction<T>,
-  { threadModules = [], args = [] }: ITaskOption = {},
+export const executeInThread = <T, P>(
+  task: TaskFunction<T, P>,
+  { threadModules = [], args = [] }: ITaskOption<P> = {},
 ): Promise<any> => {
-  const params: any[] = [...args];
+  const params: P[] = [...args];
   const modules: string[] = [...threadModules];
 
   const workerSchema = createWorker(task, params, modules);
@@ -24,7 +25,9 @@ export const executeInThread = <T>(
  * @param options - Options for the worker thread.
  * @returns The result of the task function.
  */
-export function ExecuteInThread(options?: ITaskOption): MethodDecorator {
+function DeprecatedExecuteInThread<P>(
+  options?: ITaskOption<P>,
+): MethodDecorator {
   return function (
     target: any,
     propertyKey: string | symbol,
@@ -38,14 +41,17 @@ export function ExecuteInThread(options?: ITaskOption): MethodDecorator {
       // Ensure correct context for the task function
       const task: TaskFunction<any> = originalMethod.bind(this);
 
-      const params: any[] = [...args, ...taskArgs];
-      const modules: string[] = [...threadModules];
-      // Create worker schema
-      const workerSchema = createWorker(task, params, modules);
-      // Start worker and return its result
-      return startWorker(workerSchema);
+      return executeInThread(task, {
+        threadModules,
+        args: [...taskArgs, ...args],
+      });
     };
 
     return descriptor;
   };
 }
+
+export const ExecuteInThread = deprecate(
+  DeprecatedExecuteInThread,
+  'The `ExecuteInThread` decorator is deprecated. Use an alternative method.',
+);
