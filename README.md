@@ -49,10 +49,6 @@ $ npm i nestworker
 - [Error handling](https://github.com/VaheHak/nestworker/blob/master/examples/error-handling.ts)
 - [Use modules inside the thread](https://github.com/VaheHak/nestworker/blob/master/examples/modules-in-thread.ts)
 
-## Contributing
-
-See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/CONTRIBUTING.md) for detailed instructions on how to get started with our project.
-
 ## API
 
 ### `executeInThread(task, { args: any[] }`
@@ -90,15 +86,15 @@ In this example, we're reading a file in a separate thread and returning the dat
 ```ts
 import { executeInThread } from 'nestworker';
 
-async function task(fileName) {
+async function task(filename: string) {
 // Closure doesn't work here
   const { readFile } = await import('fs/promises');
-  const content = await readFile(__filename);
+  const content = await readFile(filename);
   return content.toString();
 }
 
 async function read() {
-  const content = await executeInThread(task, fileName);
+  const content = await executeInThread(task, { args: [filename] });
   console.log(content);
 }
 
@@ -111,7 +107,7 @@ There is also another option if you don't want to use `import` inside the functi
 import { executeInThread } from 'nestworker';
 
 // this will be executed in a dedicated thread
-async function task(modules: string[]) {
+async function task(modules: { 'fs/promises': typeof import('fs/promises') }) {
   // Closure doesn't work here
   const { readFile } = modules['fs/promises'];
 
@@ -131,6 +127,17 @@ async function read() {
 read();
 ```
 
-The `ThreadModules` class lets you set up modules for the thread. You can provide it only thorough the second argument, and you'll have access to the libraries through the `modules` object.
+The `threadModules` parameter is an array of strings that represent the `modules` you want to use in the thread.
+The `modules` will be imported and passed to the task function `first argument` as an object.
 
-You should only provide the `ThreadModules` type of object once through the second parameter. Attempting to provide it multiple times will result in an error. Additionally, avoid returning the `modules` object from the task function, as it will also lead to errors.
+## Contributing
+
+See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/CONTRIBUTING.md) for detailed instructions on how to get started with our project.
+
+## Author
+
+Vahe Hakobyan: [Telegram](https://t.me/vahe_hak)
+
+## License
+
+Licensed under [MIT](https://github.com/VaheHak/nestworker/blob/master/LICENSE).
