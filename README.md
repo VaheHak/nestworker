@@ -1,6 +1,14 @@
 ![](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 ![](https://img.shields.io/npm/dt/nestworker.svg)
+![](https://img.shields.io/npm/v/nestworker.svg)
 ![](https://img.shields.io/npm/l/nestworker.svg)
+![](https://img.shields.io/github/issues/VaheHak/nestworker.svg)
+![](https://img.shields.io/github/contributors/VaheHak/nestworker.svg)
+![](https://img.shields.io/github/last-commit/VaheHak/nestworker.svg)
+![](https://img.shields.io/github/forks/VaheHak/nestworker.svg)
+![](https://img.shields.io/github/stars/VaheHak/nestworker.svg)
+![](https://img.shields.io/github/watchers/VaheHak/nestworker.svg)
+
 
 # nestworker
 A simple library that provides an abstraction for the Node.js `worker_threads` module. You can run your function in a dedicated thread by working with Promises.

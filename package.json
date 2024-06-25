@@ -1,10 +1,16 @@
 {
   "name": "nestworker",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A lightweight tool built on top of Node.js worker_threads, enabling multithreading.",
   "author": "Vahe Hakobyan",
   "private": false,
   "license": "MIT",
+  "licenses": [
+    {
+      "type": "MIT",
+      "url": "https://github.com/VaheHak/nestworker/blob/master/LICENSE"
+    }
+  ],
   "scripts": {
     "prebuild": "rimraf dist",
     "build": "nest build",
