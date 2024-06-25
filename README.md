@@ -19,11 +19,11 @@ import { executeInThread } from 'nestworker';
 
 async function calculate(): Promise<void> {
   const values = await Promise.all([
-    executeInThread(() => 2 ** 10),
+    executeInThread(() => 2 ** 10), // this doesn't block the main thread
     executeInThread(() => 3 ** 10),
   ]);
 
-  console.log(values);
+  console.log(values); // [1024, 59049]
 }
 
 calculate();
@@ -55,7 +55,7 @@ See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/C
 
 ## API
 
-### executeInThread(task, { args: any[] }
+### `executeInThread(task, { args: any[] }`
 Runs the specified function in a separate thread.
 
 #### Parameters
@@ -65,7 +65,7 @@ Runs the specified function in a separate thread.
     - Parameter cann't be a function.
 
 ```ts
-const task = function([a, b, c]) { ... };
+const task = function(a: number, b: object, c: boolean) { ... };
 executeInThread(task, { args: [1, {}, true] })
 ```
 
