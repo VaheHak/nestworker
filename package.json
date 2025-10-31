@@ -47,7 +47,7 @@
     "url": "https://github.com/VaheHak/nestworker.git"
   },
   "dependencies": {
-    "@nestjs/common": "10.3.8"
+    "@nestjs/common": "10.4.20"
   },
   "devDependencies": {
     "@nestjs/cli": "10.3.2",
