@@ -1,4 +1,3 @@
-import { deprecate } from 'node:util';
 import { ITaskOption, TaskFunction } from './models';
 import { createWorker } from './worker/skeleton';
 import { startWorker } from './worker/executor';
@@ -25,9 +24,7 @@ export const executeInThread = <T, P>(
  * @param options - Options for the worker thread.
  * @returns The result of the task function.
  */
-function DeprecatedExecuteInThread<P>(
-  options?: ITaskOption<P>,
-): MethodDecorator {
+export function ExecuteInThread<P>(options?: ITaskOption<P>): MethodDecorator {
   return function (
     target: any,
     propertyKey: string | symbol,
@@ -38,20 +35,15 @@ function DeprecatedExecuteInThread<P>(
     const { threadModules = [], args: taskArgs = [] } = options || {};
 
     descriptor.value = function (...args: any[]) {
-      // Ensure correct context for the task function
-      const task: TaskFunction<any> = originalMethod.bind(this);
+      const combinedArgs = [...taskArgs, ...args];
+      const task = originalMethod.bind(this);
 
       return executeInThread(task, {
         threadModules,
-        args: [...taskArgs, ...args],
+        args: combinedArgs,
       });
     };
 
     return descriptor;
   };
 }
-
-export const ExecuteInThread = deprecate(
-  DeprecatedExecuteInThread,
-  'The `ExecuteInThread` decorator is deprecated. Use an alternative method.',
-);
