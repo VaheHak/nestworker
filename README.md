@@ -9,7 +9,7 @@
 ![](https://img.shields.io/github/stars/VaheHak/nestworker.svg)
 ![](https://img.shields.io/github/watchers/VaheHak/nestworker.svg)
 
-<p style="text-align: center">
+<p align="center">
   <img src="icon.svg" width="120" alt="nestworker" />
 </p>
 

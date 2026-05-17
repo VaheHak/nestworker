@@ -1,6 +1,6 @@
 {
   "name": "nestworker",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Enterprise-grade worker thread module for NestJS — priority pool, auto-discovery, DI in workers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -27,7 +27,8 @@
     "node",
     "workers",
     "thread",
-    "multithreading"
+    "multithreading",
+    "backend"
   ],
   "author": "Vahe Hakobyan",
   "license": "MIT",
