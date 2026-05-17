@@ -12,15 +12,11 @@ import type { DiscoveredTask } from '../core/worker.interfaces';
 /**
  * WorkerDiscoveryService
  *
- * FIX: exposes scan() instead of implementing OnApplicationBootstrap.
+ * Scans both module.providers AND module.controllers so that
+ * @WorkerClass() / @WorkerTask() work on NestJS controllers too.
  *
- * Both OnModuleInit and OnApplicationBootstrap fire during NestJS's own
- * bootstrap sequence — before the user's AppModule providers (ImageService
- * etc.) are guaranteed to be instantiated. The container walk finds nothing.
- *
- * scan() is called lazily by WorkerService on the first run() call.
- * By that point NestFactory.createApplicationContext() has fully resolved
- * and every provider in every module is instantiated.
+ * scan() is called lazily by WorkerService on the first run() call,
+ * guaranteeing all providers and controllers are fully instantiated.
  */
 @Injectable()
 export class WorkerDiscoveryService {
@@ -37,7 +33,12 @@ export class WorkerDiscoveryService {
     this.scanned = true;
 
     for (const module of this.modulesContainer.values()) {
+      // Scan providers (services, repositories, etc.)
       for (const wrapper of module.providers.values()) {
+        this.inspectWrapper(wrapper as InstanceWrapper);
+      }
+      // Scan controllers — NestJS registers these separately
+      for (const wrapper of module.controllers.values()) {
         this.inspectWrapper(wrapper as InstanceWrapper);
       }
     }
