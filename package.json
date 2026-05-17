@@ -1,0 +1,57 @@
+{
+  "name": "nestworker",
+  "version": "2.0.0",
+  "description": "Enterprise-grade worker thread module for NestJS — priority pool, auto-discovery, DI in workers",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "build:watch": "tsc -p tsconfig.build.json --watch",
+    "example": "npm run build && node dist/example/main.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "nestjs",
+    "worker",
+    "worker-threads",
+    "thread-pool",
+    "cpu",
+    "parallel",
+    "offload",
+    "typescript",
+    "node",
+    "workers",
+    "thread",
+    "multithreading"
+  ],
+  "author": "Vahe Hakobyan",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^10.0.0 || ^11.0.0",
+    "@nestjs/core": "^10.0.0 || ^11.0.0",
+    "reflect-metadata": "^0.1.0 || ^0.2.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.1.21",
+    "@nestjs/core": "^11.1.21",
+    "@types/node": "^22.0.0",
+    "reflect-metadata": "^0.2.2",
+    "typescript": "^5.6.0"
+  },
+  "bugs": {
+    "url": "https://github.com/VaheHak/nestworker/issues"
+  },
+  "homepage": "https://github.com/VaheHak/nestworker#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VaheHak/nestworker.git"
+  }
+}
