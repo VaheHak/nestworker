@@ -1,0 +1,38 @@
+# Dependency directories
+node_modules
+
+# Directories
+/src
+/examples
+
+# Logs
+*.log
+
+# Ignore
+.gitignore
+
+# Documentation
+docs/
+
+# Test files
+test/
+*.spec.js
+
+# Configuration files
+.env
+.eslint*
+.prettierrc
+
+# Miscellaneous
+*.bak
+*.tmp
+*.swp
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
