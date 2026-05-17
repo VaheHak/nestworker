@@ -1,16 +1,17 @@
 import 'reflect-metadata';
-import { NestFactory } from '@nestjs/core';
-import { Module } from '@nestjs/common';
-import { WorkerModule } from '../core/worker.module';
-import { WorkerService } from '../core/worker.service';
-import { ConfigService } from './config.service';
-import { ImageService } from './image.service';
+import {NestFactory} from '@nestjs/core';
+import {Module} from '@nestjs/common';
+import {WorkerModule} from '../core/worker.module';
+import {WorkerService} from '../core/worker.service';
+import {ConfigService} from './config.service';
+import {ImageService} from './image.service';
 
 @Module({
-  imports: [WorkerModule.forRoot({ poolSize: 4 })],
+  imports: [WorkerModule.forRoot({poolSize: 4})],
   providers: [ConfigService, ImageService],
 })
-class AppModule {}
+class AppModule {
+}
 
 async function bootstrap() {
   const app = await NestFactory.createApplicationContext(AppModule, {
@@ -32,7 +33,7 @@ async function bootstrap() {
   console.log('\n▶ generateThumbnail [priority: LOW override]');
   console.time('generateThumbnail');
   const thumb = await workerService.run<string>(
-    'ImageService', 'generateThumbnail', [1920, 1080], { priority: 'LOW' }
+    'ImageService', 'generateThumbnail', [1920, 1080], {priority: 'LOW'}
   );
   console.timeEnd('generateThumbnail');
   console.log('  result:', thumb);
@@ -41,10 +42,11 @@ async function bootstrap() {
   console.log('\n▶ concurrent x4 [all 4 workers busy simultaneously]');
   console.time('concurrent');
   const results = await Promise.allSettled([
-    workerService.run<number>('ImageService', 'resizeImage',       [1], {priority: 'LOW'}),
-    workerService.run<number>('ImageService', 'resizeImage',       [2], {priority: 'LOW', timeout: 100}),
-    workerService.run<string>('ImageService', 'generateThumbnail', [640, 480], {priority:'HIGH'}),
-    workerService.run<string>('ImageService', 'generateThumbnail', [1280, 720],{priority:'HIGH'}),
+    workerService.run<number>('ImageService', 'resizeImage', [1], {priority: 'LOW'}),
+    workerService.run<number>('ImageService', 'resizeImage', [2], {priority: 'LOW', timeout: 100}),
+    workerService.run<string>('ImageService', 'generateThumbnail', [640, 480], {priority: 'HIGH'}),
+    workerService.run<string>('ImageService', 'moduleImport'),
+    workerService.run<string>('ImageService', 'moduleRequire'),
   ]);
   console.timeEnd('concurrent');
   console.log('  results:', results);

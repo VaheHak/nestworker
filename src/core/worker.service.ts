@@ -107,7 +107,7 @@ export class WorkerService implements OnModuleDestroy {
   run<T = unknown>(
     serviceName: string,
     methodName: string,
-    args: unknown[],
+    args: unknown[] = [],
     overrides: { priority?: TaskPriority; timeout?: number } = {},
   ): Promise<T> {
     this.initPool();

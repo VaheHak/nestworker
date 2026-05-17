@@ -9,6 +9,10 @@
 ![](https://img.shields.io/github/stars/VaheHak/nestworker.svg)
 ![](https://img.shields.io/github/watchers/VaheHak/nestworker.svg)
 
+<p style="text-align: center">
+  <img src="icon.svg" width="120" alt="nestworker" />
+</p>
+
 # nestworker
 
 Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a managed pool of Node.js worker threads without blocking the event loop — with decorator-driven auto-discovery, priority queuing, and transparent NestJS dependency injection inside workers.
@@ -17,11 +21,12 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 
 ## Features
 
-- **Worker pool** — pre-spawned threads with backpressure queue; no jobs dropped
-- **Priority queue** — `HIGH / NORMAL / LOW` tasks, binary-search sorted
-- **Decorator discovery** — `@WorkerClass` + `@WorkerTask` replace manual registries
-- **DI in workers** — declared deps are snapshotted and reconstructed inside each thread; `this.configService.get()` works normally
-- **Per-task timeout** — configurable per decorator or per call
+- **Worker pool** — pre-spawned threads with backpressure queue; no jobs are ever dropped
+- **Priority queue** — `HIGH / NORMAL / LOW`, binary-search sorted
+- **Decorator discovery** — `@WorkerClass` + `@WorkerTask` replace all manual registration
+- **DI in workers** — declared deps are snapshotted and reconstructed in each thread
+- **Dynamic imports** — use `await import('node:os')` inside task methods
+- **Per-task timeout** — configurable via decorator or overridden per call
 - **Safe shutdown** — drains queue, terminates workers with a 2-second deadline
 
 ---
@@ -36,10 +41,17 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 | `reflect-metadata` | `^0.1` or `^0.2` |
 | TypeScript `target` | `ES2022` or higher |
 
-> **Important:** `tsconfig.json` must have `"target": "ES2022"` (or higher) and
-> `"emitDecoratorMetadata": true`. The module uses `Class.toString()` to extract
-> class source for workers — this requires native class syntax, not the function
-> expressions emitted by older targets.
+`tsconfig.json` must have:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
+```
 
 ---
 
@@ -123,6 +135,43 @@ export class ImageController {
   }
 }
 ```
+---
+
+## Using Modules Inside Task Methods
+
+Worker tasks are reconstructed from class source via `eval()`. Top-level `import` statements from your file are **not available** inside the worker. Use one of these two patterns instead.
+
+### Dynamic import — preferred
+
+`import()` is a language keyword, not a variable. It works natively inside `eval()`'d code with no setup, and is compatible with both ESM and CommonJS projects.
+
+```ts
+@WorkerTask()
+async moduleImport(): Promise<string> {
+  const os = await import('node:os');
+  return `Import os size ${os.cpus().length}`
+}
+```
+
+### Inline `require()` — CJS projects only
+
+`require` is injected into the eval scope by `WorkerContainer`, so it works in CommonJS projects.
+
+```ts
+@WorkerTask()
+async moduleRequire(): Promise<string> {
+  const os = require('node:os');
+  return `Require os size ${os.cpus().length}`
+}
+```
+
+### What is safe to import inside a worker
+
+| ✅ Safe | ❌ Not safe |
+|---|---|
+| Node built-ins: `os`, `path`, `crypto`, `zlib`, `fs` | HTTP clients (`axios`, `fetch`) |
+| Pure computation libraries | Database drivers |
+| `Buffer`, `Math`, `Date` | `Socket`, `Stream` |
 
 ---
 
@@ -235,11 +284,10 @@ WorkerService.run()
 
 ### What deps can be passed to workers
 
-✅ Services that hold plain data (config maps, lookup tables, constants)  
-✅ Services whose methods only read from own properties  
-❌ Services that hold open DB connections  
-❌ Services that make HTTP calls in their methods  
-❌ Services with Socket, Stream, or Promise properties  
+✅ Services holding plain config data (`Record`, `Map`, arrays, primitives)  
+✅ Services whose methods only read from their own properties  
+❌ Services that hold DB connections, HTTP clients, or open streams  
+❌ Services with `Socket`, `Stream`, or non-cloneable properties
 
 ---
 
@@ -257,21 +305,19 @@ await Promise.all([
   workerService.run('Svc', 'highPriorityTask2',  [], { priority: 'HIGH'   }),
 ]);
 ```
-
 ---
 
 ## Constraints
 
-### Arguments and return values
+### Arguments and Return Values
 
-Method arguments and return values cross a thread boundary via `postMessage()`. They must be [structuredClone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) compatible:
+Task arguments and return values cross a thread boundary via `postMessage()` and must be [structuredClone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) compatible.
 
-✅ Primitives, plain objects, arrays, `Map`, `Set`, `ArrayBuffer`  
-❌ Class instances, functions, `Promise`, `WeakMap`, DOM nodes  
-
-### TypeScript target
-
-`tsconfig.json` must use `"target": "ES2022"` or higher. Lower targets compile classes to function expressions whose `toString()` does not start with `class` — breaking the source extraction.
+| ✅ Supported | ❌ Not supported |
+|---|---|
+| Primitives, plain objects, arrays | Class instances |
+| `Map`, `Set`, `ArrayBuffer` | Functions |
+| `TypedArray`, `DataView` | `Promise`, `WeakMap` |
 
 ### Circular deps
 
