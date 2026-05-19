@@ -38,20 +38,33 @@ export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[]
   const result: SerializedService[] = [];
 
   for (const [serviceName, { representative, methods }] of byService) {
-    const { metatype, instance, deps } = representative;
+    const { metatype, instance } = representative;
 
     const depTypes: (new (...a: unknown[]) => unknown)[] =
       Reflect.getMetadata(WORKER_DEPS_META, metatype) ?? [];
 
-    const serializedDeps: SerializedDep[] = depTypes.map((DepType, i) => {
-      const depInstance = deps[i];
-      const propertyKey =
-        findDepPropertyKey(instance, depInstance) ?? camelCase(DepType.name);
+    const serializedDeps: SerializedDep[] = depTypes.map((DepType) => {
+      // Derive the property key from the class name first as a candidate,
+      // then verify by looking at the live instance's own properties.
+      // We read the dep instance DIRECTLY from the service instance's property
+      // rather than from moduleRef.get() — this avoids the NestJS Proxy
+      // mismatch where moduleRef returns the real instance but the service
+      // holds a lazy Proxy wrapper (different references, same underlying object).
+      const candidateKey = camelCase(DepType.name);
+      const propertyKey = findDepPropertyKey(instance, DepType) ?? candidateKey;
+
+      // Always read the dep from the live service instance by property key —
+      // this gives us the exact object the service will use at runtime,
+      // including any NestJS Proxy wrapper, so snapshot captures real state.
+      const depInstance =
+        (instance as Record<string, unknown>)[propertyKey] ??
+        (instance as Record<string, unknown>)[candidateKey];
+
       return {
         name: DepType.name,
         filePath: findFilePath(DepType),
         snapshot: snapshotInstance(depInstance),
-        propertyKey,
+        propertyKey: propertyKey ?? candidateKey,
       };
     });
 
@@ -73,9 +86,17 @@ export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[]
  */
 function findFilePath(ctor: new (...args: unknown[]) => unknown): string {
   for (const [filePath, mod] of Object.entries(require.cache)) {
-    if (!mod?.exports) continue;
-    for (const val of Object.values(mod.exports)) {
-      if (val === ctor) return filePath;
+    if (!mod?.exports || typeof mod.exports !== 'object') continue;
+    // Object.values() triggers getters on prototype-based exports (e.g. Express
+    // IncomingMessage.protocol accesses this.socket which is undefined at scan
+    // time). Iterate keys manually and guard each access with try/catch.
+    for (const key of Object.keys(mod.exports)) {
+      // Skip getters entirely — accessing them may trigger deprecation warnings
+      // (e.g. Express req.host) or throw (e.g. IncomingMessage.protocol).
+      // Constructors are always plain value exports, never getters.
+      const desc = Object.getOwnPropertyDescriptor(mod.exports, key);
+      if (!desc || typeof desc.get === 'function') continue;
+      if (desc.value === ctor) return filePath;
     }
   }
   throw new Error(
@@ -87,12 +108,17 @@ function findFilePath(ctor: new (...args: unknown[]) => unknown): string {
 
 function findDepPropertyKey(
   serviceInstance: unknown,
-  depInstance: unknown,
+  DepType: new (...args: unknown[]) => unknown,
 ): string | undefined {
   if (!serviceInstance || typeof serviceInstance !== 'object') return undefined;
-
+  // private readonly fields are non-enumerable — must use getOwnPropertyNames().
+  // We match by constructor type rather than reference equality to correctly
+  // handle NestJS Proxy wrappers: the service may hold a Proxy of the dep
+  // while moduleRef.get() returns the unwrapped instance — different refs,
+  // same underlying class. instanceof sees through Proxy transparently.
   for (const key of Object.getOwnPropertyNames(serviceInstance)) {
-    if ((serviceInstance as Record<string, unknown>)[key] === depInstance) return key;
+    const val = (serviceInstance as Record<string, unknown>)[key];
+    if (val instanceof DepType) return key;
   }
   return undefined;
 }
@@ -100,11 +126,18 @@ function findDepPropertyKey(
 function snapshotInstance(instance: unknown): Record<string, unknown> {
   if (!instance || typeof instance !== 'object') return {};
   const out: Record<string, unknown> = {};
-
+  // private readonly fields are non-enumerable — must use getOwnPropertyNames()
   for (const k of Object.getOwnPropertyNames(instance)) {
     const v = (instance as Record<string, unknown>)[k];
     if (typeof v === 'function' || typeof v === 'symbol') continue;
-    try { structuredClone(v); out[k] = v; } catch { /* skip non-cloneable */ }
+    try {
+      // Store the CLONED value, not the original reference.
+      // structuredClone succeeds for plain outer objects even when they
+      // contain non-cloneable internal slots nested deeply — in that case
+      // storing `v` would pass a live socket/stream reference into workerData,
+      // producing broken objects with missing internal state in the worker.
+      out[k] = structuredClone(v);
+    } catch { /* skip non-cloneable values entirely */ }
   }
   return out;
 }

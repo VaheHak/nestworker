@@ -137,34 +137,6 @@ export class ImageController {
 ```
 ---
 
-## Using Modules Inside Task Methods
-
-Worker tasks are reconstructed from class source via `eval()`. Top-level `import` statements from your file are **not available** inside the worker. Use one of these two patterns instead.
-
-### Dynamic import — preferred
-
-`import()` is a language keyword, not a variable. It works natively inside `eval()`'d code with no setup, and is compatible with both ESM and CommonJS projects.
-
-```ts
-@WorkerTask()
-async moduleImport(): Promise<string> {
-  const os = await import('node:os');
-  return `Import os size ${os.cpus().length}`
-}
-```
-
-### Inline `require()` — CJS projects only
-
-`require` is injected into the eval scope by `WorkerContainer`, so it works in CommonJS projects.
-
-```ts
-@WorkerTask()
-async moduleRequire(): Promise<string> {
-  const os = require('node:os');
-  return `Require os size ${os.cpus().length}`
-}
-```
-
 ### What is safe to import inside a worker
 
 | ✅ Safe | ❌ Not safe |
