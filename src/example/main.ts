@@ -7,7 +7,7 @@ import {ConfigService} from './config.service';
 import {ImageService} from './image.service';
 
 @Module({
-  imports: [WorkerModule.forRoot({poolSize: 4})],
+  imports: [WorkerModule.forRoot({poolSize: 8})],
   providers: [ConfigService, ImageService],
 })
 class AppModule {
@@ -47,6 +47,7 @@ async function bootstrap() {
     workerService.run<string>('ImageService', 'generateThumbnail', [640, 480], {priority: 'HIGH'}),
     workerService.run<string>('ImageService', 'moduleImport'),
     workerService.run<string>('ImageService', 'moduleRequire'),
+    workerService.run<string>('ImageService', 'outlineModule'),
   ]);
   console.timeEnd('concurrent');
   console.log('  results:', results);

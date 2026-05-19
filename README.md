@@ -252,42 +252,43 @@ Returns a `Promise<T>` that resolves with the method's return value.
 
 ## How DI in Workers Works
 
-Worker threads run in an isolated V8 context — they share no heap with the main thread. Passing live NestJS services across the boundary is impossible.
+Worker threads run in an isolated V8 context — they share no heap with the main thread. Passing live NestJS services across the boundary is not possible directly.
 
-This module solves it in three steps:
+nestworker solves it in three steps:
 
-**1. Main thread — `serializeForWorker()`**
+**1. Main thread — locate compiled files**
 
-`Class.toString()` extracts each class as a plain JS source string (no imports, no decorators). Each dep's data properties are snapshotted via `structuredClone`. Both are sent to workers via `workerData`.
+`serializeForWorker()` walks `require.cache` to find the compiled `.js` file path for each dep constructor. It also snapshots each dep's own properties via `structuredClone` to capture runtime state (e.g. loaded config values).
 
-**2. Worker thread — `WorkerContainer`**
+**2. Worker thread — `vm.runInContext()`**
 
-The class source strings are `eval()`'d back into constructors. Each dep is reconstructed as `Object.create(DepClass.prototype) + Object.assign(snapshot)` — restoring prototype methods AND runtime state. The service class is then `new ServiceClass(...depInstances)`.
+Each compiled `.js` file is executed inside a `vm` context with a custom `require()` that stubs NestJS decorator packages (`@nestjs/common`, `@nestjs/core`, etc.) so that decorator calls at file-eval time are silent no-ops. All other imports resolve normally through Node's module system — including Node built-ins and third-party packages.
+
+Each dep is reconstructed as `Object.create(DepClass.prototype)` + `Object.assign(snapshot)`, restoring both prototype methods and runtime state. The dep is then assigned to the service instance by property key.
 
 **3. Result**
 
-`this.configService.get('KEY')` inside a worker task works exactly as on the main thread — as long as the dep reads from plain data (no DB connections, no HTTP clients).
+`this.configService.get('KEY')` inside a worker task works exactly as on the main thread.
 
 ```
-MAIN THREAD                         WORKER THREAD
-────────────────────────────────    ────────────────────────────────────
-WorkerService.run()
-  → discovery.scan()                
-  → ConfigService live instance     
-  → snapshot: { config: {...} }  →  Object.create(ConfigService.prototype)
-  → classSource: "class Cfg..."  →  eval("class ConfigService { get()... }")
-                                    Object.assign(inst, snapshot)
-  → ImageService classSource     →  eval("class ImageService {...}")
-                                    new ImageService(configInst)
-                                    this.configService.get() ✓
+MAIN THREAD                              WORKER THREAD
+─────────────────────────────────────    ──────────────────────────────────────
+serializeForWorker()
+  ConfigService → filePath + snapshot →  vm.runInContext(config.service.js)
+                                         Object.create(ConfigService.prototype)
+                                         Object.assign(inst, snapshot)
+  ImageService  → filePath           →  vm.runInContext(image.service.js)
+                                         Object.create(ImageService.prototype)
+                                         inst.configService = configInst
+                                         this.configService.get() ✓
 ```
 
-### What deps can be passed to workers
+### What deps can be used
 
-✅ Services holding plain config data (`Record`, `Map`, arrays, primitives)  
-✅ Services whose methods only read from their own properties  
+✅ Services holding plain config data (`object`, `Map`, arrays, primitives)  
+✅ Services whose methods only read from their own snapshotted properties  
 ❌ Services that hold DB connections, HTTP clients, or open streams  
-❌ Services with `Socket`, `Stream`, or non-cloneable properties
+❌ Services with `Socket`, `Stream`, or other non-cloneable properties
 
 ---
 

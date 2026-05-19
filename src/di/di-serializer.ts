@@ -6,16 +6,17 @@ import { WORKER_DEPS_META } from '../decorators/worker-task.decorator';
  * serializeForWorker – converts the live NestJS service graph into a
  * structured-clone-safe SerializedService[] payload for workerData.
  *
- * KEY DESIGN DECISION: class source extraction instead of file paths.
+ * KEY DESIGN DECISION: file paths instead of class source strings.
  *
- * We cannot pass filePaths to workers because require(filePath) inside a
- * worker thread re-executes the compiled .ts output which imports @nestjs/common
- * at the top level — crashing the isolated worker context.
+ * The previous approach extracted class source via Class.toString() and
+ * eval()'d it inside the worker. This broke on any import that TS compiled
+ * to a file-scoped alias (crypto_1, node_os_1, …) because those aliases
+ * don't exist inside a bare new Function() scope.
  *
- * Instead we extract each class's constructor and prototype methods as plain JS
- * source strings on the main thread (where NestJS is fully loaded), then send
- * those strings via workerData. WorkerContainer eval()s them in the worker —
- * no require(), no NestJS imports, no crash.
+ * The new approach sends the absolute path to each compiled .js file.
+ * WorkerContainer runs each file in a vm context with a custom require()
+ * that stubs NestJS packages (so decorator calls at file-eval time are
+ * silent no-ops) while letting all other imports resolve normally.
  */
 export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[] {
   const byService = new Map<
@@ -48,7 +49,7 @@ export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[]
         findDepPropertyKey(instance, depInstance) ?? camelCase(DepType.name);
       return {
         name: DepType.name,
-        classSource: extractClassSource(DepType),
+        filePath: findFilePath(DepType),
         snapshot: snapshotInstance(depInstance),
         propertyKey,
       };
@@ -56,7 +57,7 @@ export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[]
 
     result.push({
       name: serviceName,
-      classSource: extractClassSource(metatype),
+      filePath: findFilePath(metatype),
       methods,
       deps: serializedDeps,
     });
@@ -66,45 +67,32 @@ export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[]
 }
 
 /**
- * Extract a plain, self-contained class source string from a constructor.
- *
- * In TypeScript compiled output, Function.prototype.toString() on a class
- * returns the full class body including all methods — but WITHOUT the
- * import statements or decorator calls at the top of the file.
- *
- * Example output:
- *   "class ConfigService {
- *      constructor() { this.config = { MULTIPLIER: '3' }; }
- *      get(k) { return this.config[k]; }
- *      getNumber(k) { return Number(this.config[k]); }
- *    }"
- *
- * This is eval()-safe and has no NestJS dependencies.
+ * Locate the compiled .js file for this constructor by scanning require.cache.
+ * NestJS loads all providers via require() so every user-defined class will
+ * be present in the cache at the time serializeForWorker() is called.
  */
-function extractClassSource(metatype: new (...args: unknown[]) => unknown): string {
-  const src = metatype.toString();
-  // Compiled TS classes always start with "class ClassName"
-  // Strip any leading helper assignments TypeScript sometimes emits
-  const classStart = src.indexOf('class ');
-  if (classStart === -1) {
-    throw new Error(
-      `Could not extract class source for "${metatype.name}". ` +
-      `Ensure the project is compiled with "target": "ES2022" or higher ` +
-      `so classes are emitted as native class declarations, not functions.`
-    );
+function findFilePath(ctor: new (...args: unknown[]) => unknown): string {
+  for (const [filePath, mod] of Object.entries(require.cache)) {
+    if (!mod?.exports) continue;
+    for (const val of Object.values(mod.exports)) {
+      if (val === ctor) return filePath;
+    }
   }
-  return src.slice(classStart);
+  throw new Error(
+    `nestworker: could not find compiled file for "${ctor.name}" in require.cache. ` +
+    `Ensure the class is exported from its module file and the project is ` +
+    `compiled (not running via ts-node) before starting.`,
+  );
 }
 
 function findDepPropertyKey(
   serviceInstance: unknown,
-  depInstance: unknown
+  depInstance: unknown,
 ): string | undefined {
   if (!serviceInstance || typeof serviceInstance !== 'object') return undefined;
-  for (const [key, value] of Object.entries(
-    serviceInstance as Record<string, unknown>
-  )) {
-    if (value === depInstance) return key;
+
+  for (const key of Object.getOwnPropertyNames(serviceInstance)) {
+    if ((serviceInstance as Record<string, unknown>)[key] === depInstance) return key;
   }
   return undefined;
 }
@@ -112,7 +100,9 @@ function findDepPropertyKey(
 function snapshotInstance(instance: unknown): Record<string, unknown> {
   if (!instance || typeof instance !== 'object') return {};
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(instance as Record<string, unknown>)) {
+
+  for (const k of Object.getOwnPropertyNames(instance)) {
+    const v = (instance as Record<string, unknown>)[k];
     if (typeof v === 'function' || typeof v === 'symbol') continue;
     try { structuredClone(v); out[k] = v; } catch { /* skip non-cloneable */ }
   }

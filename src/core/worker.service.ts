@@ -1,4 +1,4 @@
-import {Inject, Injectable, OnModuleDestroy} from '@nestjs/common';
+import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import {WorkerPool} from './worker.pool';
 import {WorkerDiscoveryService} from '../discovery/discovery.service';
 import {serializeForWorker} from '../di/di-serializer';
@@ -39,7 +39,7 @@ import type {TaskPriority, WorkerModuleOptions} from './worker.interfaces';
  * ```
  */
 @Injectable()
-export class WorkerService implements OnModuleDestroy {
+export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private pool: WorkerPool | null = null;
   private readonly taskOptions = new Map<
     string,
@@ -54,6 +54,10 @@ export class WorkerService implements OnModuleDestroy {
     @Inject('WORKER_OPTIONS')
     private readonly options: WorkerModuleOptions,
   ) {
+  }
+
+  onModuleInit(): void {
+    this.initPool();
   }
 
   private initPool(): void {
@@ -110,8 +114,6 @@ export class WorkerService implements OnModuleDestroy {
     args: unknown[] = [],
     overrides: { priority?: TaskPriority; timeout?: number } = {},
   ): Promise<T> {
-    this.initPool();
-
     const key = `${serviceName}.${methodName}`;
 
     const defaults =

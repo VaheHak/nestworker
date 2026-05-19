@@ -1,14 +1,15 @@
-import {Injectable} from '@nestjs/common';
-import {WorkerClass, WorkerTask} from '../decorators/worker-task.decorator';
-import {ConfigService} from './config.service';
+import { Injectable } from '@nestjs/common';
+import { WorkerClass, WorkerTask } from '../decorators/worker-task.decorator';
+import { ConfigService } from './config.service';
+import fs from 'fs/promises';
 
 @Injectable()
-@WorkerClass({deps: [ConfigService]})
+@WorkerClass({ deps: [ConfigService] })
 export class ImageService {
   constructor(private readonly configService: ConfigService) {
   }
 
-  @WorkerTask()
+  @WorkerTask({ priority: 'HIGH' })
   resizeImage(value: number): number {
     const multiplier = this.configService.getNumber('MULTIPLIER');
     const iterations = this.configService.getNumber('ITERATIONS');
@@ -28,12 +29,19 @@ export class ImageService {
   @WorkerTask()
   async moduleImport(): Promise<string> {
     const os = await import('node:os');
-    return `Import os size ${os.cpus().length}`
+    return `Import os size ${os.cpus().length}`;
   }
 
   @WorkerTask()
   async moduleRequire(): Promise<string> {
     const os = require('node:os');
-    return `Require os size ${os.cpus().length}`
+    return `Require os size ${os.cpus().length}`;
+  }
+
+  @WorkerTask()
+  async outlineModule(): Promise<{ p: number, f: number }> {
+    const p = await fs.readFile('./package.json', 'utf-8');
+    const f = (await fetch('https://api.github.com')).status;
+    return { p: p.length, f };
   }
 }

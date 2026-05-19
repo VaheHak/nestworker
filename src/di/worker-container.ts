@@ -1,34 +1,30 @@
 /**
  * WorkerContainer – minimal DI container for worker threads.
  *
- * WHY NOT require(filePath)?
- * Compiled NestJS files import @nestjs/common at the top — requiring them
- * inside a worker triggers the full NestJS bootstrap chain which throws.
+ * APPROACH: vm.runInNewContext() with a shared module cache.
  *
- * THE FIX: extract each class as a plain JS string on the main thread via
- * Class.toString() (no imports, no decorators), send through workerData,
- * and eval() back into a constructor inside the worker.
+ * Each compiled .js file is executed inside a vm context that has:
+ *   - A custom require() that blocks NestJS bootstrap imports (returning
+ *     transparent Proxy stubs so decorator calls at file-eval time are no-ops)
+ *   - Full access to Node built-ins and third-party packages
+ *   - Correct __filename / __dirname so relative requires resolve properly
  *
- * WHY HELPERS ARE INJECTED:
- * new Function() runs in the global scope. TypeScript compiles dynamic
- * imports using file-level helpers:
- *
- *   await import('node:os')
- *   → Promise.resolve().then(() => __importStar(require('node:os')))
- *
- * These helpers are defined as `(this && this.__importStar)` at the top of
- * each compiled file — `this` being the module. Inside new Function(),
- * `this` is the global object so all helpers resolve to undefined, causing:
- *   Fatal: Error: __importStar is not defined
- *
- * We define the helpers here (Node 16+ always has Object.create, no ternary
- * needed) and inject them alongside require as explicit parameters so both
- * `await import()` and `require()` work correctly inside task methods.
+ * This avoids every problem of the new Function() approach:
+ *   - No alias injection (crypto_1, node_os_1, …)
+ *   - No TS helper injection (__importStar, __importDefault, …)
+ *   - No class-body-only extraction — the full compiled file runs as-is
+ *   - Dynamic import() and require() both work natively
  */
+
+import vm from 'node:vm';
+import nodePath from 'node:path';
+import nodeModule from 'node:module';
+import fs from 'node:fs';
 
 export interface SerializedDep {
   name: string;
-  classSource: string;
+  /** Absolute path to the compiled .js file that exports this class */
+  filePath: string;
   snapshot: Record<string, unknown>;
   propertyKey: string;
 }
@@ -41,71 +37,87 @@ export interface SerializedMethod {
 
 export interface SerializedService {
   name: string;
-  classSource: string;
+  /** Absolute path to the compiled .js file that exports this class */
+  filePath: string;
   methods: SerializedMethod[];
   deps: SerializedDep[];
 }
 
-// ── TypeScript CJS helpers ────────────────────────────────────────────────
-// Node 16+ always has Object.create — no legacy ternary branch needed.
+/**
+ * NestJS packages that must never be required inside a worker.
+ * Requiring them triggers the full NestJS bootstrap chain which crashes
+ * in an isolated vm context. We stub them with a transparent Proxy so
+ * decorator calls (@Injectable, @Controller, etc.) at file-eval time
+ * become silent no-ops.
+ */
+const NESTJS_STUB_PACKAGES = new Set([
+  '@nestjs/common',
+  '@nestjs/core',
+  '@nestjs/microservices',
+  '@nestjs/platform-express',
+  '@nestjs/platform-fastify',
+  'reflect-metadata',
+]);
 
-function __createBinding(
-  o: Record<string, unknown>,
-  m: Record<string, unknown>,
-  k: string,
-  k2?: string
-): void {
-  if (k2 === undefined) k2 = k;
-  const desc = Object.getOwnPropertyDescriptor(m, k);
-  if (!desc || ('get' in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-    Object.defineProperty(o, k2, { enumerable: true, get: () => m[k] });
-  } else {
-    o[k2] = m[k];
+/**
+ * A Proxy that silently absorbs NestJS decorator calls at file-eval time.
+ *
+ * The apply trap passes through its first argument when it is a function —
+ * this preserves the class through decorator factory patterns emitted by TS:
+ *
+ *   MyClass = Injectable()(MyClass) ?? MyClass
+ *            └─ NOOP_STUB() ──┘└─ apply(MyClass) → MyClass ─┘
+ *
+ * Without this, NOOP_STUB would replace the class, breaking all exports.
+ */
+const NOOP_STUB: unknown = new Proxy(
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
+  function () {},
+  {
+    get: (_t, _k) => NOOP_STUB,
+    apply: (_t, _this, args) => {
+      // If called with a class/function as the first arg (decorator pattern),
+      // return it unchanged so the assignment keeps the real class.
+      const first = (args as unknown[])[0];
+      return typeof first === 'function' ? first : NOOP_STUB;
+    },
+    construct: () => Object.create(null),
   }
-}
-
-function __setModuleDefault(
-  o: Record<string, unknown>,
-  v: unknown
-): void {
-  Object.defineProperty(o, 'default', { enumerable: true, value: v });
-}
-
-function __importStar(
-  mod: Record<string, unknown>
-): Record<string, unknown> {
-  if (mod && mod.__esModule) return mod;
-  const result: Record<string, unknown> = {};
-  if (mod != null) {
-    for (const k of Object.getOwnPropertyNames(mod)) {
-      if (k !== 'default') __createBinding(result, mod, k);
-    }
-  }
-  __setModuleDefault(result, mod);
-  return result;
-}
-
-function __importDefault(
-  mod: Record<string, unknown>
-): Record<string, unknown> {
-  return mod && mod.__esModule ? mod : { default: mod };
-}
+);
 
 // ── WorkerContainer ───────────────────────────────────────────────────────
 
 export class WorkerContainer {
   private readonly instances = new Map<string, unknown>();
 
+  /**
+   * Module export cache — keyed by absolute file path.
+   * Avoids re-executing the same file multiple times when several services
+   * live in the same compiled output (monorepo barrel files, etc.).
+   */
+  private readonly fileCache = new Map<string, Record<string, unknown>>();
+
   load(services: SerializedService[]): void {
     for (const svc of services) {
-      const depInstances: unknown[] = [];
+      // Reconstruct each dep from its compiled file + snapshot
+      const depsByKey = new Map<string, unknown>();
       for (const dep of svc.deps) {
-        const inst = this.reconstructFromSource(dep.classSource, dep.name, dep.snapshot);
+        const inst = this.reconstructFromFile(dep.filePath, dep.name, dep.snapshot);
         this.instances.set(dep.name, inst);
-        depInstances.push(inst);
+        depsByKey.set(dep.propertyKey, inst);
       }
-      const ServiceClass = this.evalClass(svc.classSource, svc.name);
-      const serviceInstance = new ServiceClass(...depInstances);
+
+      // Allocate the service without calling its constructor — deps are
+      // assigned by property key so constructor slot order never matters.
+      const ServiceClass = this.loadClass(svc.filePath, svc.name);
+      const serviceInstance = Object.create(
+        ServiceClass.prototype as object,
+      ) as Record<string, unknown>;
+
+      for (const [key, inst] of depsByKey) {
+        serviceInstance[key] = inst;
+      }
+
       this.instances.set(svc.name, serviceInstance);
     }
   }
@@ -116,50 +128,88 @@ export class WorkerContainer {
     return inst as T;
   }
 
-  private reconstructFromSource(
-    classSource: string,
+  private reconstructFromFile(
+    filePath: string,
     className: string,
-    snapshot: Record<string, unknown>
+    snapshot: Record<string, unknown>,
   ): unknown {
-    const DepClass = this.evalClass(classSource, className);
+    const DepClass = this.loadClass(filePath, className);
     const instance = Object.create(DepClass.prototype as object) as Record<string, unknown>;
     Object.assign(instance, snapshot);
     return instance;
   }
 
   /**
-   * eval() a plain class declaration and return the constructor.
-   *
-   * require + all four TypeScript CJS helpers are injected as explicit
-   * parameters so that compiled dynamic imports (`await import(...)`) and
-   * inline require() calls inside task methods work correctly.
+   * Load a named export from a compiled .js file by running it in a vm
+   * context. The context's require() stubs NestJS packages so decorators
+   * at file-eval time are silent no-ops, while all other imports resolve
+   * normally through the real Node module system.
    */
-  private evalClass(
-    classSource: string,
-    className: string
+  private loadClass(
+    filePath: string,
+    className: string,
   ): new (...args: unknown[]) => unknown {
-    // eslint-disable-next-line no-new-func
-    const factory = new Function(
-      'require',
-      '__importStar',
-      '__importDefault',
-      '__createBinding',
-      '__setModuleDefault',
-      `return (${classSource})`
-    );
+    const exports = this.runFile(filePath);
 
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const cls = factory(
-      require,
-      __importStar,
-      __importDefault,
-      __createBinding,
-      __setModuleDefault
-    );
-
+    const cls = exports[className];
     if (typeof cls !== 'function') {
-      throw new Error(`WorkerContainer: eval of "${className}" did not return a constructor`);
+      throw new Error(
+        `WorkerContainer: "${className}" not found in "${filePath}". ` +
+        `Available exports: ${Object.keys(exports).join(', ')}`,
+      );
     }
     return cls as new (...args: unknown[]) => unknown;
+  }
+
+  /**
+   * Execute a compiled .js file in an isolated vm context and return its
+   * module.exports. Results are cached by file path.
+   */
+  private runFile(filePath: string): Record<string, unknown> {
+    const cached = this.fileCache.get(filePath);
+    if (cached) return cached;
+
+    const source = fs.readFileSync(filePath, 'utf8');
+    const mod = { exports: {} as Record<string, unknown> };
+
+    const customRequire = nodeModule.createRequire(filePath);
+    const sandboxRequire = (id: string): unknown => {
+      if (NESTJS_STUB_PACKAGES.has(id)) return NOOP_STUB;
+      return customRequire(id);
+    };
+
+    const context = vm.createContext({
+      require: sandboxRequire,
+      module: mod,
+      exports: mod.exports,
+      __filename: filePath,
+      __dirname: nodePath.dirname(filePath),
+      // Standard globals the compiled output may reference
+      console,
+      process,
+      Buffer,
+      URL,
+      URLSearchParams,
+      fetch,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      setImmediate,
+      clearImmediate,
+      Promise,
+      // Make the context's global === the context itself so that
+      // `(this && this.__importStar)` patterns resolve to the context global
+      // rather than to undefined (as they would in new Function()).
+      global: undefined as unknown, // set below after createContext
+    });
+
+    // Wire global → context so self-referential global patterns work
+    (context as Record<string, unknown>).global = context;
+
+    vm.runInContext(source, context, { filename: filePath });
+
+    this.fileCache.set(filePath, mod.exports);
+    return mod.exports;
   }
 }
