@@ -15,19 +15,26 @@
 
 # nestworker
 
-Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a managed pool of Node.js worker threads without blocking the event loop — with decorator-driven auto-discovery, priority queuing, and transparent NestJS dependency injection inside workers.
+Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a managed pool of Node.js worker threads without blocking the event loop — with decorator-driven auto-discovery, priority queuing, retry, graceful shutdown, health checks, metrics, and transparent NestJS dependency injection inside workers.
 
 ---
 
 ## Features
 
-- **Worker pool** — pre-spawned threads with backpressure queue; no jobs are ever dropped
-- **Priority queue** — `HIGH / NORMAL / LOW`, binary-search sorted
+- **Worker pool** — pre-spawned threads, warmed up before the first request
+- **Zero cold start** — pool initialises on `onModuleInit`, not on the first call
+- **Priority queue** — `HIGH / NORMAL / LOW`, binary-search sorted; no jobs are ever dropped
 - **Decorator discovery** — `@WorkerClass` + `@WorkerTask` replace all manual registration
-- **DI in workers** — declared deps are snapshotted and reconstructed in each thread
-- **Dynamic imports** — use `await import('node:os')` inside task methods
-- **Per-task timeout** — configurable via decorator or overridden per call
-- **Safe shutdown** — drains queue, terminates workers with a 2-second deadline
+- **deps** — services serialised into the worker via `vm.runInContext()` + snapshot; use for plain config/data helpers
+- **proxy** — services that stay on the main thread; the worker calls them transparently via IPC round-trip; use for DB, HTTP, queues
+- **Retry + dead letter** — automatic retry with configurable delay; exhausted jobs emit a `dead` event
+- **AbortController** — cancel queued or running tasks via `AbortSignal`
+- **Graceful shutdown** — drains in-flight jobs before terminating workers, with a configurable deadline
+- **Structured error forwarding** — errors preserve `name`, `message`, `stack`, `code`, and custom fields across the thread boundary
+- **AsyncLocalStorage propagation** — ALS context (request ID, tenant, user) is snapshotted and restored inside workers
+- **OpenTelemetry trace propagation** — active span context is injected into each job; no hard dependency
+- **Health indicator** — plugs into `@nestjs/terminus`
+- **Metrics** — counters, per-task duration percentiles (p50/p95/p99); push to any provider
 
 ---
 
@@ -35,11 +42,13 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 
 | Package | Version |
 |---|---|
-| Node.js | ≥ 16 (worker_threads) |
+| Node.js | ≥ 16 |
 | `@nestjs/common` | `^10` or `^11` |
 | `@nestjs/core` | `^10` or `^11` |
 | `reflect-metadata` | `^0.1` or `^0.2` |
 | TypeScript `target` | `ES2022` or higher |
+
+> **Important:** the project must be compiled to JS before running. nestworker locates compiled files via `require.cache`, which is only populated after compilation. Running via `ts-node` directly is not supported.
 
 `tsconfig.json` must have:
 
@@ -60,24 +69,36 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 ```bash
 npm install nestworker
 ```
+
 ---
 
 ## Quick Start
 
-### 1. Import `WorkerModule` in your root module
+### 1. Register `WorkerModule`
 
 ```ts
 // app.module.ts
 import { Module } from '@nestjs/common';
 import { WorkerModule } from 'nestworker';
-import { ConfigService } from './config.service';
-import { ImageService } from './image.service';
 
 @Module({
-  imports: [WorkerModule.forRoot()],
-  providers: [ConfigService, ImageService],  // register your @WorkerClass providers here
+  imports: [
+    WorkerModule.forRoot({ poolSize: 4 }),
+  ],
 })
 export class AppModule {}
+```
+
+Or async, when options come from `ConfigService`:
+
+```ts
+WorkerModule.forRootAsync({
+  inject: [ConfigService],
+  useFactory: (cfg: ConfigService) => ({
+    poolSize: cfg.get<number>('WORKER_POOL_SIZE'),
+    shutdownTimeout: 30_000,
+  }),
+})
 ```
 
 ### 2. Decorate your service
@@ -89,29 +110,21 @@ import { WorkerClass, WorkerTask } from 'nestworker';
 import { ConfigService } from './config.service';
 
 @Injectable()
-@WorkerClass({ deps: [ConfigService] })   // deps are injected into the worker
+@WorkerClass({ deps: [ConfigService] })
 export class ImageService {
   constructor(private readonly configService: ConfigService) {}
 
-  @WorkerTask({ priority: 'HIGH' })
+  @WorkerTask({ priority: 'HIGH', timeout: 10_000, retry: 2, retryDelay: 500 })
   resizeImage(value: number): number {
-    // runs in a worker thread — configService works normally here
     const multiplier = this.configService.getNumber('MULTIPLIER');
     let total = 0;
     for (let i = 0; i < 10_000_000; i++) total += i * value * multiplier;
     return total;
   }
-
-  @WorkerTask({ priority: 'NORMAL', timeout: 5000 })
-  generateThumbnail(width: number, height: number): string {
-    let hash = 0;
-    for (let i = 0; i < 5_000_000; i++) hash ^= (i * width * height) | 0;
-    return `thumb_${hash.toString(16)}_${width}x${height}.webp`;
-  }
 }
 ```
 
-### 3. Inject `WorkerService` and call `run()`
+### 3. Call `run()`
 
 ```ts
 // image.controller.ts
@@ -123,27 +136,11 @@ export class ImageController {
   constructor(private readonly workerService: WorkerService) {}
 
   @Get('resize')
-  async resize() {
+  resize() {
     return this.workerService.run<number>('ImageService', 'resizeImage', [5]);
-  }
-
-  @Get('thumbnail')
-  async thumbnail() {
-    return this.workerService.run<string>(
-      'ImageService', 'generateThumbnail', [1920, 1080]
-    );
   }
 }
 ```
----
-
-### What is safe to import inside a worker
-
-| ✅ Safe | ❌ Not safe |
-|---|---|
-| Node built-ins: `os`, `path`, `crypto`, `zlib`, `fs` | HTTP clients (`axios`, `fetch`) |
-| Pure computation libraries | Database drivers |
-| `Buffer`, `Math`, `Date` | `Socket`, `Stream` |
 
 ---
 
@@ -151,146 +148,375 @@ export class ImageController {
 
 ### `WorkerModule.forRoot(options?)`
 
-Registers the module globally. Call once at the application root.
-
-```ts
-WorkerModule.forRoot({
-  poolSize: 4,  // default: os.cpus().length
-})
-```
-
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `poolSize` | `number` | `os.cpus().length` | Number of worker threads to spawn |
+| `poolSize` | `number` | `os.cpus().length` | Worker thread count |
+| `shutdownTimeout` | `number` | `30_000` | Ms to wait for in-flight jobs on shutdown |
+| `asyncLocalStorages` | `AsyncLocalStorage[]` | `[]` | ALS instances to propagate into workers |
+
+### `WorkerModule.forRootAsync(options)`
+
+| Field | Type | Description |
+|---|---|---|
+| `inject` | `any[]` | Tokens to inject into `useFactory` |
+| `useFactory` | `(...args) => WorkerModuleOptions` | Factory — may be async |
 
 ---
 
 ### `@WorkerClass(options?)`
 
-Class decorator. Marks a NestJS provider as a container of worker tasks.
-
-```ts
-@WorkerClass({ deps: [ConfigService, LoggerService] })
-export class MyService { ... }
-```
+Marks a NestJS provider as a container of worker tasks.
 
 | Option | Type | Description |
 |---|---|---|
-| `deps` | `Type[]` | Injectable dependencies to reconstruct inside workers |
+| `deps` | `Type[]` | Services to **serialise** into the worker. Must hold plain cloneable data — no DB connections, sockets, or streams. |
+| `proxy` | `Type[]` | Services that **stay on the main thread**. The worker calls them via IPC. Use for anything with I/O. |
 
 ---
 
 ### `@WorkerTask(options?)`
 
-Method decorator. Marks a method to be offloaded to a worker thread.
-
-```ts
-@WorkerTask({ priority: 'HIGH', timeout: 3000 })
-heavyComputation(input: number): number { ... }
-```
+Marks a method to be offloaded to a worker thread.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `priority` | `'HIGH' \| 'NORMAL' \| 'LOW'` | `'NORMAL'` | Queue priority — `HIGH` jobs run first |
-| `timeout` | `number` | `undefined` | Reject the job after this many ms |
+| `priority` | `'HIGH' \| 'NORMAL' \| 'LOW'` | `'NORMAL'` | Queue priority |
+| `timeout` | `number` | — | Reject after this many ms |
+| `retry` | `number` | `0` | Extra attempts after first failure |
+| `retryDelay` | `number` | `0` | Ms between retry attempts |
 
 ---
 
-### `WorkerService.run<T>(serviceName, methodName, args, overrides?)`
-
-Executes a `@WorkerTask` method in a worker thread.
-
-```ts
-// Uses priority/timeout from the @WorkerTask decorator
-const result = await workerService.run<number>('ImageService', 'resizeImage', [5]);
-
-// Override priority or timeout for a specific call
-const result = await workerService.run<number>(
-  'ImageService', 'resizeImage', [5],
-  { priority: 'LOW', timeout: 10_000 }
-);
-```
+### `WorkerService.run<T>(serviceName, methodName, args?, options?)`
 
 | Parameter | Type | Description |
 |---|---|---|
 | `serviceName` | `string` | Class name of the `@WorkerClass` provider |
-| `methodName` | `string` | Method name decorated with `@WorkerTask` |
-| `args` | `unknown[]` | Arguments to pass — must be structuredClone-compatible |
-| `overrides` | `object` | Optional `priority` / `timeout` override for this call |
+| `methodName` | `string` | Method decorated with `@WorkerTask` |
+| `args` | `unknown[]` | structuredClone-compatible arguments |
+| `options` | `RunOptions` | Per-call overrides (see below) |
 
-Returns a `Promise<T>` that resolves with the method's return value.
+```ts
+interface RunOptions {
+  priority?: TaskPriority;
+  timeout?: number;
+  retry?: number;
+  retryDelay?: number;
+  signal?: AbortSignal;   // cancel the task
+}
+```
 
 ---
 
-## How DI in Workers Works
+### `WorkerService` events
 
-Worker threads run in an isolated V8 context — they share no heap with the main thread. Passing live NestJS services across the boundary is not possible directly.
-
-nestworker solves it in three steps:
-
-**1. Main thread — locate compiled files**
-
-`serializeForWorker()` walks `require.cache` to find the compiled `.js` file path for each dep constructor. It also snapshots each dep's own properties via `structuredClone` to capture runtime state (e.g. loaded config values).
-
-**2. Worker thread — `vm.runInContext()`**
-
-Each compiled `.js` file is executed inside a `vm` context with a custom `require()` that stubs NestJS decorator packages (`@nestjs/common`, `@nestjs/core`, etc.) so that decorator calls at file-eval time are silent no-ops. All other imports resolve normally through Node's module system — including Node built-ins and third-party packages.
-
-Each dep is reconstructed as `Object.create(DepClass.prototype)` + `Object.assign(snapshot)`, restoring both prototype methods and runtime state. The dep is then assigned to the service instance by property key.
-
-**3. Result**
-
-`this.configService.get('KEY')` inside a worker task works exactly as on the main thread.
-
-```
-MAIN THREAD                              WORKER THREAD
-─────────────────────────────────────    ──────────────────────────────────────
-serializeForWorker()
-  ConfigService → filePath + snapshot →  vm.runInContext(config.service.js)
-                                         Object.create(ConfigService.prototype)
-                                         Object.assign(inst, snapshot)
-  ImageService  → filePath           →  vm.runInContext(image.service.js)
-                                         Object.create(ImageService.prototype)
-                                         inst.configService = configInst
-                                         this.configService.get() ✓
+```ts
+workerService.onTaskStart((job) => { ... });
+workerService.onTaskEnd((job, durationMs) => { ... });
+workerService.onTaskError((job, error) => { ... });
+workerService.onDead((event) => { ... });   // job exhausted all retries
 ```
 
-### What deps can be used
+---
 
-✅ Services holding plain config data (`object`, `Map`, arrays, primitives)  
-✅ Services whose methods only read from their own snapshotted properties  
-❌ Services that hold DB connections, HTTP clients, or open streams  
-❌ Services with `Socket`, `Stream`, or other non-cloneable properties
+## `deps` vs `proxy`
+
+This is the most important decision when declaring a `@WorkerClass`.
+
+### `deps` — serialise into the worker
+
+The service's compiled `.js` file is executed inside the worker via `vm.runInContext()`. Its instance properties are snapshotted via `structuredClone` and restored. The worker gets a fully independent copy — method calls are local, zero IPC overhead.
+
+**Use when:** the service holds plain data (config values, lookup tables, constants) and its methods are pure computation over that data.
+
+```ts
+// ConfigService holds { multiplier: 3, iterations: 1_000_000 }
+// — plain object, fully cloneable → safe to use as dep
+
+@WorkerClass({ deps: [ConfigService] })
+export class ImageService {
+  constructor(private readonly configService: ConfigService) {}
+
+  @WorkerTask()
+  resize(value: number): number {
+    // configService is a local copy inside the worker — no IPC
+    return this.configService.getNumber('MULTIPLIER') * value;
+  }
+}
+```
+
+✅ Plain objects, arrays, primitives, `Map`, `Set`
+❌ DB connections, HTTP clients, sockets, streams, open file handles
+
+### `proxy` — stay on the main thread, call via IPC
+
+The service is **not** sent to the worker. Instead, a lightweight stub is injected whose methods send an `ipc:invoke` message to the main thread and return a `Promise` that resolves when the main thread replies. The real NestJS service executes on the main thread with full access to DB, HTTP, and everything else.
+
+**Use when:** the service does I/O — database queries, HTTP calls, cache reads, queue operations.
+
+```ts
+// UserService queries a database — cannot be cloned → use proxy
+
+@WorkerClass({ proxy: [UserService] })
+export class ReportService {
+  constructor(private readonly userService: UserService) {}
+
+  @WorkerTask()
+  async generateReport(userId: string): Promise<string> {
+    // this call transparently round-trips to the main thread
+    const user = await this.userService.findById(userId);
+
+    // heavy CPU work runs in the worker
+    return crunchNumbers(user);
+  }
+}
+```
+
+The IPC round-trip looks like this:
+
+```
+WORKER                                    MAIN THREAD
+──────────────────────────────────────    ───────────────────────────────
+this.userService.findById(userId)
+  │
+  ├─ postMessage({ type: 'ipc:invoke',  →  onMessage handler
+  │    method: 'findById', args: [...] })   │
+  │                                         ├─ userService.findById(userId)
+  │                                         │  (real DB query, main thread)
+  │                                         │
+  ◀── postMessage({ type: 'ipc:result', ─── └─ reply with result
+       data: { id, name, ... } })
+  │
+  └─ Promise resolves with user ✓
+```
+
+> **Constraint:** proxy method arguments and return values must be `structuredClone`-compatible — they cross the thread boundary via `postMessage`. Plain objects, arrays, and primitives work. Class instances, functions, and sockets do not.
+
+### Using both together
+
+`deps` and `proxy` can be combined in the same `@WorkerClass`:
+
+```ts
+@WorkerClass({
+  deps:  [ConfigService],   // cloned into worker — fast local access
+  proxy: [UserService],     // stays on main thread — IPC on each call
+})
+export class ReportService {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly userService: UserService,
+  ) {}
+
+  @WorkerTask({ priority: 'LOW' })
+  async buildReport(userId: string): Promise<Buffer> {
+    const limit  = this.configService.getNumber('REPORT_LIMIT'); // local, zero IPC
+    const user   = await this.userService.findById(userId);      // IPC round-trip
+    return heavyPdfGeneration(user, limit);
+  }
+}
+```
+
+---
+
+## AbortController
+
+Cancel a queued or running task by passing an `AbortSignal`:
+
+```ts
+const controller = new AbortController();
+
+// Cancel after 3 seconds if not done
+setTimeout(() => controller.abort(), 3000);
+
+try {
+  const result = await workerService.run(
+    'ImageService', 'resizeImage', [5],
+    { signal: controller.signal },
+  );
+} catch (err) {
+  if (err.name === 'AbortError') {
+    console.log('Task was cancelled');
+  }
+}
+```
+
+The `AbortSignal` is also injected as the last argument of the task method, so you can respond to cancellation inside the worker:
+
+```ts
+@WorkerTask()
+processChunks(data: number[], signal: AbortSignal): number {
+  let total = 0;
+  for (const chunk of data) {
+    if (signal.aborted) break;   // stop early on cancel
+    total += heavyCompute(chunk);
+  }
+  return total;
+}
+```
+
+---
+
+## Retry and Dead Letter
+
+```ts
+@WorkerTask({ retry: 3, retryDelay: 1000 })
+async fetchAndProcess(id: string): Promise<string> { ... }
+```
+
+After all attempts fail, a `dead` event fires:
+
+```ts
+workerService.onDead((event) => {
+  console.error(`Job ${event.jobId} failed after ${event.attempts} attempts`);
+  console.error(event.error.message);
+  // push to external DLQ, alert, etc.
+});
+```
+
+---
+
+## Graceful Shutdown
+
+On application shutdown, nestworker waits up to `shutdownTimeout` ms for in-flight jobs to complete before force-terminating workers. Queued jobs that haven't started are rejected immediately.
+
+```ts
+WorkerModule.forRoot({ shutdownTimeout: 30_000 })
+```
+
+---
+
+## AsyncLocalStorage Propagation
+
+Pass your ALS instances to `forRoot` — their current store is snapshotted at dispatch time and restored inside the worker before the task runs:
+
+```ts
+export const requestAls = new AsyncLocalStorage<{ requestId: string }>();
+
+WorkerModule.forRoot({
+  asyncLocalStorages: [requestAls],
+})
+
+// Inside a worker task:
+@WorkerTask()
+process(): void {
+  const store = requestAls.getStore(); // { requestId: '...' } ✓
+}
+```
+
+---
+
+## Health Indicator
+
+```ts
+// health.module.ts
+import { WorkerHealthIndicator } from 'nestworker';
+
+@Module({ providers: [WorkerHealthIndicator] })
+export class HealthModule {}
+```
+
+```ts
+// health.controller.ts
+import { Controller, Get } from '@nestjs/common';
+import { HealthCheck, HealthCheckService } from '@nestjs/terminus';
+import { WorkerHealthIndicator } from 'nestworker';
+
+@Controller('health')
+export class HealthController {
+  constructor(
+    private readonly health: HealthCheckService,
+    private readonly workerHealth: WorkerHealthIndicator,
+  ) {}
+
+  @Get()
+  @HealthCheck()
+  check() {
+    return this.health.check([
+      () => this.workerHealth.check('workers'),
+    ]);
+  }
+}
+```
+
+Reports `down` when workers are still warming up or queue depth exceeds pool size.
+
+---
+
+## Metrics
+
+```ts
+// app.module.ts
+import { WorkerMetricsService } from 'nestworker';
+
+@Module({ providers: [WorkerMetricsService] })
+export class AppModule {}
+```
+
+```ts
+// metrics.controller.ts
+import { WorkerMetricsService } from 'nestworker';
+
+@Controller('metrics')
+export class MetricsController {
+  constructor(private readonly workerMetrics: WorkerMetricsService) {}
+
+  @Get()
+  snapshot() {
+    return this.workerMetrics.snapshot();
+  }
+}
+```
+
+```json
+{
+  "jobsTotal": 1500,
+  "jobsSuccess": 1480,
+  "jobsFailed": 15,
+  "jobsTimeout": 3,
+  "jobsDead": 2,
+  "queueDepth": 4,
+  "idleWorkers": 2,
+  "busyWorkers": 6,
+  "durations": {
+    "ImageService.resizeImage": { "p50": 42, "p95": 310, "p99": 890, "count": 1200 },
+    "ReportService.buildReport": { "p50": 180, "p95": 950, "p99": 2100, "count": 300 }
+  }
+}
+```
 
 ---
 
 ## Priority Queue
 
-Jobs queue when all threads are busy. The queue is sorted by priority — `HIGH` always runs before `NORMAL` which runs before `LOW`. Within the same priority, jobs are FIFO.
+Jobs queue when all threads are busy, sorted by priority — `HIGH` always runs before `NORMAL` before `LOW`. Within the same priority, FIFO.
 
 ```ts
-// These four tasks are dispatched to the pool concurrently.
-// HIGH tasks run first regardless of arrival order.
 await Promise.all([
-  workerService.run('Svc', 'lowPriorityTask',    [], { priority: 'LOW'    }),
-  workerService.run('Svc', 'highPriorityTask',   [], { priority: 'HIGH'   }),
-  workerService.run('Svc', 'normalPriorityTask', [], { priority: 'NORMAL' }),
-  workerService.run('Svc', 'highPriorityTask2',  [], { priority: 'HIGH'   }),
+  workerService.run('Svc', 'task', [], { priority: 'LOW'    }),
+  workerService.run('Svc', 'task', [], { priority: 'HIGH'   }),
+  workerService.run('Svc', 'task', [], { priority: 'NORMAL' }),
+  workerService.run('Svc', 'task', [], { priority: 'HIGH'   }),
 ]);
+// Execution order: HIGH → HIGH → NORMAL → LOW
 ```
+
 ---
 
 ## Constraints
 
-### Arguments and Return Values
+### Arguments and return values
 
-Task arguments and return values cross a thread boundary via `postMessage()` and must be [structuredClone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) compatible.
+Must be [structuredClone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) compatible.
 
 | ✅ Supported | ❌ Not supported |
 |---|---|
-| Primitives, plain objects, arrays | Class instances |
-| `Map`, `Set`, `ArrayBuffer` | Functions |
-| `TypedArray`, `DataView` | `Promise`, `WeakMap` |
+| Primitives, plain objects, arrays | Class instances with methods |
+| `Map`, `Set`, `ArrayBuffer`, `Buffer` | Functions, closures |
+| `TypedArray`, `DataView` | `Promise`, `WeakMap`, `Socket` |
+
+### Compiled output required
+
+nestworker locates class files via `require.cache`. The project must be compiled to `.js` before running — `ts-node` is not supported.
 
 ### Circular deps
 
@@ -300,7 +526,7 @@ Circular dependencies between `@WorkerClass({ deps })` entries are not supported
 
 ## Contributing
 
-See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/CONTRIBUTING.md) for detailed instructions on how to get started with our project.
+See the [contributing guide](https://github.com/VaheHak/nestworker/blob/master/CONTRIBUTING.md).
 
 ## License
 

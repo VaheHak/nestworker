@@ -1,13 +1,13 @@
 import 'reflect-metadata';
-import {NestFactory} from '@nestjs/core';
-import {Module} from '@nestjs/common';
-import {WorkerModule} from '../core/worker.module';
-import {WorkerService} from '../core/worker.service';
-import {ConfigService} from './config.service';
-import {ImageService} from './image.service';
+import { NestFactory } from '@nestjs/core';
+import { Module } from '@nestjs/common';
+import { WorkerModule } from '../core/worker.module';
+import { WorkerService } from '../core/worker.service';
+import { ConfigService } from './config.service';
+import { ImageService } from './image.service';
 
 @Module({
-  imports: [WorkerModule.forRoot({poolSize: 16})],
+  imports: [WorkerModule.forRoot({ poolSize: 4, shutdownTimeout: 10000 })],
   providers: [ConfigService, ImageService],
 })
 class AppModule {
@@ -20,11 +20,27 @@ async function bootstrap() {
 
   const workerService = app.get(WorkerService);
 
+  workerService.onTaskStart((task) => {
+    console.log('Task started:', task.jobId, workerService.stats());
+  });
+
+  workerService.onTaskEnd(((task, durationMs) => {
+    console.log('Task ended:', task.jobId, durationMs);
+  }));
+
+  workerService.onTaskError(((task, error) => {
+    console.log('Task error:', task.jobId, error);
+  }));
+
+  workerService.onDead((task) => {
+    console.log('Task dead:', task.jobId);
+  });
+
   // ── Task 1: sequential ────────────────────────────────────────────────────
   console.log('▶ resizeImage [priority: HIGH]');
   console.time('resizeImage');
   const resized = await workerService.run<number>(
-    'ImageService', 'resizeImage', [5]
+    'ImageService', 'resizeImage', [5],
   );
   console.timeEnd('resizeImage');
   console.log('  result:', resized);
@@ -33,7 +49,7 @@ async function bootstrap() {
   console.log('\n▶ generateThumbnail [priority: LOW override]');
   console.time('generateThumbnail');
   const thumb = await workerService.run<string>(
-    'ImageService', 'generateThumbnail', [1920, 1080], {priority: 'LOW'}
+    'ImageService', 'generateThumbnail', [1920, 1080], { priority: 'LOW', retry: 3, retryDelay: 1000 },
   );
   console.timeEnd('generateThumbnail');
   console.log('  result:', thumb);
@@ -42,9 +58,9 @@ async function bootstrap() {
   console.log('\n▶ concurrent x4 [all 4 workers busy simultaneously]');
   console.time('concurrent');
   const results = await Promise.allSettled([
-    workerService.run<number>('ImageService', 'resizeImage', [1], {priority: 'LOW'}),
-    workerService.run<number>('ImageService', 'resizeImage', [2], {priority: 'LOW', timeout: 100}),
-    workerService.run<string>('ImageService', 'generateThumbnail', [640, 480], {priority: 'HIGH'}),
+    workerService.run<number>('ImageService', 'resizeImage', [1], { priority: 'LOW' }),
+    workerService.run<number>('ImageService', 'resizeImage', [2], { priority: 'LOW', timeout: 100 }),
+    workerService.run<string>('ImageService', 'generateThumbnail', [640, 480], { priority: 'HIGH' }),
     workerService.run<string>('ImageService', 'moduleImport'),
     workerService.run<string>('ImageService', 'moduleRequire'),
     workerService.run<string>('ImageService', 'outlineModule'),
