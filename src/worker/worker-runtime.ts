@@ -1,6 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import crypto from 'node:crypto';
 import { WorkerContainer } from '../di/worker-container';
 import type { SerializedService } from '../di/worker-container';
 import type {
@@ -68,29 +67,35 @@ parentPort?.on('message', (msg: unknown) => {
 
 function buildProxy(descriptor: ProxyServiceDescriptor): ServiceInstance {
   const proxy: ServiceInstance = {};
+  const propertyKey = descriptor.propertyKey;
   for (const methodName of descriptor.methodNames) {
     proxy[methodName] = (...args: unknown[]): Promise<unknown> =>
       new Promise((resolve, reject) => {
-        const callId = crypto.randomUUID();
+        const callId = nextCallId();
         pendingIpc.set(callId, { resolve, reject });
         const request: IpcInvokeRequest = {
           type: 'ipc:invoke', callId,
-          propertyKey: descriptor.propertyKey,
+          propertyKey,
           methodName, args,
         };
         try {
-          parentPort?.postMessage(request);
+          parentPort!.postMessage(request);
         } catch (err: unknown) {
           pendingIpc.delete(callId);
           reject(new Error(
-            `IPC proxy "${descriptor.propertyKey}.${methodName}" could not serialise args: ` +
-            `${(err as Error).message}`
+            `IPC proxy "${propertyKey}.${methodName}" could not serialise args: ` +
+            `${(err as Error).message}`,
           ));
         }
       });
   }
   return proxy;
 }
+
+// Counter-based call IDs — far cheaper than crypto.randomUUID() and only
+// need to be unique within this worker process.
+let __callCounter = 0;
+const nextCallId = (): string => 'c' + (++__callCounter).toString(36);
 
 const queue: WorkerJob[] = [];
 let busy = false;
@@ -117,7 +122,8 @@ async function runNext(): Promise<void> {
   }
 
   // Restore ALS context and run the task inside it
-  const alsContext = job.alsContext ?? {};
+  const alsContext = job.alsContext;
+  const hasAls = alsContext && hasOwnKeys(alsContext);
 
   const run = async () => {
     const inst = instances.get(job.serviceName);
@@ -138,10 +144,10 @@ async function runNext(): Promise<void> {
   };
 
   try {
-    // Run the task inside the ALS context so any nested ALS.getStore() calls
-    // inside the task body see the propagated main-thread context.
-    const data = await workerAls.run(alsContext, run);
-    parentPort?.postMessage({ ok: true, data });
+    // Skip the ALS wrapper entirely when there's no context to propagate —
+    // ALS.run() has measurable overhead (async-hooks resource tracking).
+    const data = hasAls ? await workerAls.run(alsContext!, run) : await run();
+    parentPort!.postMessage({ ok: true, data });
   } catch (error: unknown) {
     const e = error as Error & { code?: string | number; [key: string]: unknown };
     const serialized: SerializedError = {
@@ -152,14 +158,24 @@ async function runNext(): Promise<void> {
       // Capture any extra own enumerable properties (e.g. HttpException.status)
       extra: serializeExtraProps(e),
     };
-    parentPort?.postMessage({ ok: false, error: serialized });
+    parentPort!.postMessage({ ok: false, error: serialized });
   } finally {
     if (job.abortSignalId) {
       pendingAborts.delete(job.abortSignalId);
     }
     busy = false;
-    runNext();
+    if (queue.length > 0) runNext();
   }
+}
+
+function hasOwnKeys(obj: Record<string, unknown>): boolean {
+  // Cheaper than Object.keys(obj).length > 0 — no array allocation.
+  // noinspection LoopStatementThatDoesntLoopJS
+  for (const _k in obj) {
+    void _k;
+    return true;
+  }
+  return false;
 }
 
 function serializeExtraProps(
@@ -174,7 +190,8 @@ function serializeExtraProps(
       structuredClone(err[key]);
       extra[key] = err[key];
       hasExtra = true;
-    } catch { /* skip non-cloneable */ }
+    } catch { /* skip non-cloneable */
+    }
   }
   return hasExtra ? extra : undefined;
 }

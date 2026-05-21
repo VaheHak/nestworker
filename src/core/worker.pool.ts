@@ -36,14 +36,23 @@ type PendingTask = {
 
 export declare interface WorkerPool {
   on(event: 'dead', listener: (event: DeadLetterEvent) => void): this;
+
   on(event: 'error', listener: (err: Error, job: WorkerJob) => void): this;
+
   on(event: 'taskStart', listener: (job: WorkerJob) => void): this;
+
   on(event: 'taskEnd', listener: (job: WorkerJob, durationMs: number) => void): this;
+
   on(event: 'taskError', listener: (job: WorkerJob, error: SerializedError) => void): this;
+
   emit(event: 'dead', payload: DeadLetterEvent): boolean;
+
   emit(event: 'error', err: Error, job: WorkerJob): boolean;
+
   emit(event: 'taskStart', job: WorkerJob): boolean;
+
   emit(event: 'taskEnd', job: WorkerJob, durationMs: number): boolean;
+
   emit(event: 'taskError', job: WorkerJob, error: SerializedError): boolean;
 }
 
@@ -53,7 +62,10 @@ export class WorkerPool extends EventEmitter {
   private readonly warmingUp = new Set<Worker>();
   private readonly queue: PendingTask[] = [];
   private destroyed = false;
-  private readonly active = new Map<Worker, { task: PendingTask; priority: TaskPriority; startedAt: number }>();
+  private readonly active = new Map<
+    Worker,
+    { task: PendingTask; priority: TaskPriority; startedAt: number; handler: (msg: unknown) => void }
+  >();
 
   /** Maps abortSignalId → worker currently running that job */
   private readonly signalWorkerMap = new Map<string, Worker>();
@@ -109,8 +121,10 @@ export class WorkerPool extends EventEmitter {
           if (job.abortSignalId) {
             const worker = this.signalWorkerMap.get(job.abortSignalId);
             if (worker) {
-              try { worker.postMessage({ type: 'abort', abortSignalId: job.abortSignalId }); }
-              catch { /* worker gone */ }
+              try {
+                worker.postMessage({ type: 'abort', abortSignalId: job.abortSignalId });
+              } catch { /* worker gone */
+              }
             }
           }
         }, { once: true });
@@ -139,18 +153,33 @@ export class WorkerPool extends EventEmitter {
     this.workers.push(worker);
     this.warmingUp.add(worker);
 
-    const onReady = (msg: unknown) => {
+    // ── Single persistent message listener ───────────────────────────────
+    // We used to add/remove a listener per dispatch — that allocated several
+    // closures and mutated the EventEmitter's listener array on every task.
+    // Instead we install one listener whose behaviour switches based on
+    // whether this worker is currently warming up or running a task.
+    const onMessage = (msg: unknown) => {
       const message = msg as { type?: string };
-      if (message?.type !== 'worker:ready') return;
-      worker.removeListener('message', onReady);
-      this.warmingUp.delete(worker);
-      if (!this.destroyed) {
-        this.idle.push(worker);
-        this.schedule();
+
+      if (this.warmingUp.has(worker)) {
+        if (message?.type !== 'worker:ready') return;
+        this.warmingUp.delete(worker);
+        if (!this.destroyed) {
+          this.idle.push(worker);
+          this.schedule();
+        }
+        return;
       }
+
+      // Spurious `worker:ready` after warmup → ignore.
+      if (message?.type === 'worker:ready') return;
+
+      const running = this.active.get(worker);
+      if (!running) return; // late message for an aborted/timed-out task
+      running.handler(message);
     };
 
-    worker.on('message', onReady);
+    worker.on('message', onMessage);
     worker.once('error', (err) => this.handleWorkerError(worker, err));
     worker.once('exit', (code) => this.handleWorkerExit(worker, code));
     return worker;
@@ -158,13 +187,21 @@ export class WorkerPool extends EventEmitter {
 
   private enqueue(task: PendingTask): void {
     const weight = PRIORITY_WEIGHT[task.job.priority];
-    let lo = 0, hi = this.queue.length;
+    const q = this.queue;
+    const n = q.length;
+    // Fast path: empty queue, or tail has >= priority → just push (O(1)).
+    // This is by far the most common case under steady-state load.
+    if (n === 0 || PRIORITY_WEIGHT[q[n - 1].job.priority] >= weight) {
+      q.push(task);
+      return;
+    }
+    let lo = 0, hi = n;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
-      if (PRIORITY_WEIGHT[this.queue[mid].job.priority] < weight) hi = mid;
+      if (PRIORITY_WEIGHT[q[mid].job.priority] < weight) hi = mid;
       else lo = mid + 1;
     }
-    this.queue.splice(lo, 0, task);
+    q.splice(lo, 0, task);
   }
 
   private schedule(): void {
@@ -184,16 +221,12 @@ export class WorkerPool extends EventEmitter {
     task.attempts++;
     task.job.attempt = task.attempts - 1;
 
-    this.active.set(worker, { task, priority: task.job.priority, startedAt });
-
     if (task.job.abortSignalId) {
       this.signalWorkerMap.set(task.job.abortSignalId, worker);
     }
 
-    this.emit('taskStart', task.job);
 
     const cleanup = () => {
-      worker.removeListener('message', onMessage);
       if (timeoutHandle) clearTimeout(timeoutHandle);
       if (task.job.abortSignalId) {
         this.signalWorkerMap.delete(task.job.abortSignalId);
@@ -246,7 +279,7 @@ export class WorkerPool extends EventEmitter {
       task.reject(deserializeError(serializedError));
     };
 
-    const onMessage = async (msg: unknown) => {
+    const handler = (msg: unknown) => {
       const message = msg as WorkerOutboundMessage;
 
       // ── IPC invoke from worker ────────────────────────────────────────
@@ -255,39 +288,55 @@ export class WorkerPool extends EventEmitter {
         const svcInstance = this.proxyMap.get(req.propertyKey);
 
         const reply = (res: IpcInvokeResponse) => {
-          try { worker.postMessage(res); }
-          catch {
+          try {
+            worker.postMessage(res);
+          } catch {
             try {
               worker.postMessage({
                 type: 'ipc:result', callId: res.callId, ok: false,
                 error: `IPC result for "${req.propertyKey}.${req.methodName}" ` +
                   `is not structuredClone-compatible.`,
               } satisfies IpcInvokeResponse);
-            } catch { /* worker gone */ }
+            } catch { /* worker gone */
+            }
           }
         };
 
         if (!svcInstance) {
-          reply({ type: 'ipc:result', callId: req.callId, ok: false,
-            error: `No proxy registered for "${req.propertyKey}"` });
+          reply({
+            type: 'ipc:result', callId: req.callId, ok: false,
+            error: `No proxy registered for "${req.propertyKey}"`,
+          });
           return;
         }
         const method = svcInstance[req.methodName];
         if (typeof method !== 'function') {
-          reply({ type: 'ipc:result', callId: req.callId, ok: false,
-            error: `Method "${req.methodName}" not found on "${req.propertyKey}"` });
+          reply({
+            type: 'ipc:result', callId: req.callId, ok: false,
+            error: `Method "${req.methodName}" not found on "${req.propertyKey}"`,
+          });
           return;
         }
+        // Invoke via svcInstance[methodName](...) to preserve `this` binding.
+        // Use Promise.resolve to handle both sync and async returns without
+        // forcing an async function allocation per call.
+        let p: unknown;
         try {
-          // Call via svcInstance[method]() to preserve `this` binding.
-          // Detached call (const fn = svcInstance[m]; fn()) loses `this`
-          // in strict mode, breaking any method that reads instance properties.
-          const data = await svcInstance[req.methodName](...(req.args as unknown[]));
-          reply({ type: 'ipc:result', callId: req.callId, ok: true, data });
+          p = svcInstance[req.methodName](...(req.args as unknown[]));
         } catch (err: unknown) {
-          reply({ type: 'ipc:result', callId: req.callId, ok: false,
-            error: (err as Error).message ?? String(err) });
+          reply({
+            type: 'ipc:result', callId: req.callId, ok: false,
+            error: (err as Error).message ?? String(err),
+          });
+          return;
         }
+        Promise.resolve(p).then(
+          (data) => reply({ type: 'ipc:result', callId: req.callId, ok: true, data }),
+          (err: unknown) => reply({
+            type: 'ipc:result', callId: req.callId, ok: false,
+            error: (err as Error).message ?? String(err),
+          }),
+        );
         return;
       }
 
@@ -310,7 +359,8 @@ export class WorkerPool extends EventEmitter {
       });
     };
 
-    worker.on('message', onMessage);
+    this.active.set(worker, { task, priority: task.job.priority, startedAt, handler });
+    this.emit('taskStart', task.job);
 
     if (task.job.timeout && task.job.timeout > 0) {
       timeoutHandle = setTimeout(async () => {
@@ -326,7 +376,10 @@ export class WorkerPool extends EventEmitter {
         };
         handleFailure(serializedError);
 
-        try { await worker.terminate(); } catch {}
+        try {
+          await worker.terminate();
+        } catch {
+        }
         this.replaceWorker(worker);
         this.schedule();
       }, task.job.timeout);
@@ -354,7 +407,7 @@ export class WorkerPool extends EventEmitter {
     if (running) {
       running.task.reject(new Error(
         `Worker exited with code ${code} while running ` +
-        `"${running.task.job.serviceName}.${running.task.job.methodName}"`
+        `"${running.task.job.serviceName}.${running.task.job.methodName}"`,
       ));
       this.active.delete(worker);
     }
@@ -387,10 +440,16 @@ export class WorkerPool extends EventEmitter {
             ({ task }) => new Promise<void>((res) => {
               const orig = task.resolve;
               const origRej = task.reject;
-              task.resolve = (v) => { orig(v); res(); };
-              task.reject = (e) => { origRej(e); res(); };
-            })
-          )
+              task.resolve = (v) => {
+                orig(v);
+                res();
+              };
+              task.reject = (e) => {
+                origRej(e);
+                res();
+              };
+            }),
+          ),
         ),
         // Force after timeout
         new Promise<void>((res) => setTimeout(res, this.shutdownTimeout)),

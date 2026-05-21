@@ -2,7 +2,6 @@ import {
   Inject, Injectable, Logger,
   OnModuleDestroy, OnModuleInit,
 } from '@nestjs/common';
-import crypto from 'node:crypto';
 import { WorkerPool } from './worker.pool';
 import { WorkerDiscoveryService } from '../discovery/discovery.service';
 import { serializeForWorker } from '../di/di-serializer';
@@ -25,6 +24,20 @@ export interface RunOptions {
   signal?: AbortSignal;
 }
 
+// Monotonic ID generator — far cheaper than crypto.randomUUID() and unique
+// per-process which is all we need (jobs never leave this process).
+let __jobIdCounter = 0;
+const __jobIdPrefix = `j${Date.now().toString(36)}-`;
+const nextId = (): string => __jobIdPrefix + (++__jobIdCounter).toString(36);
+
+// Hot-path shared frozen sentinels — let v8 elide allocations on the common
+// "no proxies / no ALS context" path.
+const EMPTY_PROXIES: ProxyServiceDescriptor[] = Object.freeze([]) as unknown as ProxyServiceDescriptor[];
+const EMPTY_ALS: Record<string, unknown> = Object.freeze({}) as Record<string, unknown>;
+const DEFAULT_TASK = Object.freeze({ priority: 'NORMAL' as TaskPriority }) as {
+  priority: TaskPriority; timeout?: number; retry?: number; retryDelay?: number;
+};
+
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerService.name);
@@ -35,12 +48,15 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     { priority: TaskPriority; timeout?: number; retry?: number; retryDelay?: number }
   >();
   private readonly taskProxies = new Map<string, ProxyServiceDescriptor[]>();
+  /** Cached array of ALS storages — avoids `?? []` + entries() per call. */
+  private alsStorages: ReadonlyArray<{ getStore(): unknown }> = [];
 
   constructor(
     private readonly discovery: WorkerDiscoveryService,
     @Inject('WORKER_OPTIONS')
     private readonly options: WorkerModuleOptions,
-  ) {}
+  ) {
+  }
 
   onModuleInit(): void {
     this.initPool();
@@ -48,6 +64,8 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   private initPool(): void {
     if (this.pool) return;
+
+    this.alsStorages = (this.options.asyncLocalStorages ?? []) as ReadonlyArray<{ getStore(): unknown }>;
 
     const tasks = this.discovery.scan();
 
@@ -76,7 +94,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
     const serialized = serializeForWorker(tasks);
     const proxyInstances = Array.from(proxyMap.entries()).map(
-      ([propertyKey, { methodNames, instance }]) => ({ propertyKey, methodNames, instance })
+      ([propertyKey, { methodNames, instance }]) => ({ propertyKey, methodNames, instance }),
     );
 
     this.pool = new WorkerPool(
@@ -113,25 +131,29 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     options: RunOptions = {},
   ): Promise<T> {
     const key = `${serviceName}.${methodName}`;
-    const defaults = this.taskDefaults.get(key) ?? { priority: 'NORMAL' as TaskPriority };
-    const proxyServices = this.taskProxies.get(key) ?? [];
+    const defaults = this.taskDefaults.get(key) ?? DEFAULT_TASK;
+    const proxyServices = this.taskProxies.get(key) ?? EMPTY_PROXIES;
 
-    // Capture ALS context from all registered storages
-    const alsContext: Record<string, unknown> = {};
-    for (const [i, als] of (this.options.asyncLocalStorages ?? []).entries()) {
-      const store = als.getStore();
-      if (store !== undefined) alsContext[String(i)] = store;
+    // Capture ALS context only if any storages are registered. Empty objects
+    // still cost allocation + a structuredClone hop across the worker boundary.
+    let alsContext: Record<string, unknown> | undefined;
+    const storages = this.alsStorages;
+    for (let i = 0, len = storages.length; i < len; i++) {
+      const store = storages[i].getStore();
+      if (store !== undefined) {
+        (alsContext ??= {})[i < 10 ? String.fromCharCode(48 + i) : String(i)] = store;
+      }
     }
 
-    // Capture OTEL trace context if available
+    // Capture OTEL trace context if available (lazy, cached lookup).
     const traceContext = captureTraceContext();
 
     // Generate a unique signal ID if an AbortSignal was provided
-    const abortSignalId = options.signal ? crypto.randomUUID() : undefined;
+    const abortSignalId = options.signal ? nextId() : undefined;
 
     return this.pool!.execute<T>(
       {
-        jobId: crypto.randomUUID(),
+        jobId: nextId(),
         serviceName,
         methodName,
         args,
@@ -140,7 +162,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         retry: options.retry ?? defaults.retry ?? 0,
         retryDelay: options.retryDelay ?? defaults.retryDelay ?? 0,
         proxyServices,
-        alsContext,
+        alsContext: alsContext ?? EMPTY_ALS,
         traceContext,
         abortSignalId,
       },
@@ -186,18 +208,36 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 /**
  * Capture the active OpenTelemetry trace context if @opentelemetry/api is
  * available. Returns an empty object otherwise — no hard dependency.
+ *
+ * The require() lookup is performed at most once and cached, since it shows
+ * up on the hot path of every `run()` call.
  */
+const EMPTY_TRACE: Record<string, string> = Object.freeze({}) as Record<string, string>;
+let __otelApi:
+  | {
+  propagation: { inject(ctx: unknown, carrier: Record<string, string>): void };
+  context: { active(): unknown };
+}
+  | null
+  | undefined;
+
 function captureTraceContext(): Record<string, string> {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const api = require('@opentelemetry/api') as {
-      propagation: { inject(ctx: unknown, carrier: Record<string, string>): void };
-      context: { active(): unknown };
-    };
-    const carrier: Record<string, string> = {};
-    api.propagation.inject(api.context.active(), carrier);
-    return carrier;
-  } catch {
-    return {};
+  if (__otelApi === undefined) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      __otelApi = require('@opentelemetry/api');
+    } catch {
+      __otelApi = null;
+    }
   }
+  if (!__otelApi) return EMPTY_TRACE;
+  const carrier: Record<string, string> = {};
+  __otelApi.propagation.inject(__otelApi.context.active(), carrier);
+  // Return the shared empty object when nothing was injected to avoid
+  // a per-call structuredClone of an empty object across the worker boundary.
+  for (const _k in carrier) {
+    void _k;
+    return carrier;
+  }
+  return EMPTY_TRACE;
 }

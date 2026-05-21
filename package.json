@@ -1,6 +1,6 @@
 {
   "name": "nestworker",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Enterprise-grade worker thread module for NestJS — priority pool, auto-discovery, DI in workers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.build.json",
     "build:watch": "tsc -p tsconfig.build.json --watch",
     "example": "npm run build && node dist/example/main.js",
+    "bench": "npm run build && node dist/example/bench.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

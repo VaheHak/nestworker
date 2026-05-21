@@ -42,7 +42,7 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 
 | Package | Version |
 |---|---|
-| Node.js | ≥ 16 |
+| Node.js | ≥ 18 (uses the global `structuredClone`, available since Node 17) |
 | `@nestjs/common` | `^10` or `^11` |
 | `@nestjs/core` | `^10` or `^11` |
 | `reflect-metadata` | `^0.1` or `^0.2` |
@@ -183,7 +183,9 @@ Marks a method to be offloaded to a worker thread.
 | `priority` | `'HIGH' \| 'NORMAL' \| 'LOW'` | `'NORMAL'` | Queue priority |
 | `timeout` | `number` | — | Reject after this many ms |
 | `retry` | `number` | `0` | Extra attempts after first failure |
-| `retryDelay` | `number` | `0` | Ms between retry attempts |
+| `retryDelay` | `number \| (attempt: number) => number` | `0` | Ms between retry attempts. See note below. |
+
+> **`retryDelay` as a function:** functions can't cross the worker boundary, so when a function is supplied it's evaluated on the main thread at discovery time as the average of `fn(1)`, `fn(2)`, `fn(3)` and a warning is logged. For precise control (including exponential backoff) pass a number and recreate the curve with the per-call `RunOptions.retryDelay` override.
 
 ---
 
@@ -215,6 +217,26 @@ workerService.onTaskStart((job) => { ... });
 workerService.onTaskEnd((job, durationMs) => { ... });
 workerService.onTaskError((job, error) => { ... });
 workerService.onDead((event) => { ... });   // job exhausted all retries
+```
+
+---
+
+### `WorkerService.stats()`
+
+Returns a point-in-time snapshot of the pool — used by the health indicator and metrics service, but also useful on its own:
+
+```ts
+const { poolSize, idle, busy, queued, warmingUp } = workerService.stats();
+```
+
+```ts
+interface PoolStats {
+  poolSize:  number;
+  idle:      number;
+  busy:      number;
+  queued:    number;
+  warmingUp: number;
+}
 ```
 
 ---
@@ -400,6 +422,29 @@ WorkerModule.forRoot({
 @WorkerTask()
 process(): void {
   const store = requestAls.getStore(); // { requestId: '...' } ✓
+}
+```
+
+---
+
+## OpenTelemetry Trace Propagation
+
+If `@opentelemetry/api` is installed in your app, nestworker captures the active span context on every `run()` and re-activates it inside the worker before the task runs — distributed traces stay continuous across the thread boundary. There is **no hard dependency**: the lookup is a one-shot cached `require()` and silently no-ops when the package isn't present.
+
+```bash
+npm install @opentelemetry/api
+```
+
+```ts
+// Spans created inside @WorkerTask methods will be children of the
+// active span on the main thread at the moment run() was called.
+@WorkerTask()
+async heavyWork(): Promise<void> {
+  const tracer = trace.getTracer('my-app');
+  await tracer.startActiveSpan('heavy-work', async (span) => {
+    // ...
+    span.end();
+  });
 }
 ```
 
