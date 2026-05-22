@@ -7,7 +7,7 @@ import { ConfigService } from './config.service';
 import { ImageService } from './image.service';
 
 @Module({
-  imports: [WorkerModule.forRoot({ poolSize: 4, shutdownTimeout: 10000 })],
+  imports: [WorkerModule.forRoot({ poolSize: 16, shutdownTimeout: 10000, concurrency: 1 })],
   providers: [ConfigService, ImageService],
 })
 class AppModule {

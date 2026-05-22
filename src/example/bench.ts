@@ -23,7 +23,7 @@ import { ImageService } from './image.service';
 const TASKS = Number(process.env.TASKS ?? 5_000);
 const POOL = Number(process.env.POOL ?? os.cpus().length);
 const WARMUP = Number(process.env.WARMUP ?? 200);
-const CONCURRENCY = Number(process.env.CONCURRENCY ?? 1);
+const CONCURRENCY = Number(process.env.CONCURRENCY ?? 508);
 const METHOD = process.env.METHOD ?? 'moduleRequire';
 
 @Module({

@@ -25,5 +25,5 @@ export type {
   TaskPriority,
   DeadLetterEvent,
   PoolStats,
-  SerializedError,
+  SerializedError
 } from './core/worker.interfaces';
