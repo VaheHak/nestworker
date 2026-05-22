@@ -25,15 +25,15 @@ export interface RunOptions {
 }
 
 // Monotonic ID generator — far cheaper than crypto.randomUUID() and unique
-// per-process which is all we need (jobs never leave this process).
+// per-process which is all we need (jobs never leave this process). Numbers
+// also clone ~3× faster than strings across the worker boundary and are
+// cheaper Map keys than strings in V8.
 let __jobIdCounter = 0;
-const __jobIdPrefix = `j${Date.now().toString(36)}-`;
-const nextId = (): string => __jobIdPrefix + (++__jobIdCounter).toString(36);
+const nextId = (): number => ++__jobIdCounter;
 
 // Hot-path shared frozen sentinels — let v8 elide allocations on the common
 // "no proxies / no ALS context" path.
 const EMPTY_PROXIES: ProxyServiceDescriptor[] = Object.freeze([]) as unknown as ProxyServiceDescriptor[];
-const EMPTY_ALS: Record<string, unknown> = Object.freeze({}) as Record<string, unknown>;
 const DEFAULT_TASK = Object.freeze({ priority: 'NORMAL' as TaskPriority }) as {
   priority: TaskPriority; timeout?: number; retry?: number; retryDelay?: number;
 };
@@ -102,6 +102,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       proxyInstances,
       this.options.poolSize,
       this.options.shutdownTimeout,
+      this.options.concurrency,
     );
 
     // Forward pool events to logger and expose via EventEmitter
@@ -151,20 +152,31 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     // Generate a unique signal ID if an AbortSignal was provided
     const abortSignalId = options.signal ? nextId() : undefined;
 
+    // Build a *minimal* job object — every property we add gets walked by
+    // structuredClone on every postMessage. Omitting empty/default fields
+    // shrinks the wire payload and keeps the V8 object shape stable for
+    // the common "no proxies / no ALS / no abort" hot path. Main-thread-only
+    // metadata (priority/timeout/retry) is passed alongside, not on the wire.
+    const job: WorkerJob = {
+      jobId: nextId(),
+      serviceName,
+      methodName,
+      args,
+    };
+    if (proxyServices !== EMPTY_PROXIES && proxyServices.length > 0) {
+      job.proxyServices = proxyServices;
+    }
+    if (alsContext) job.alsContext = alsContext;
+    if (traceContext !== EMPTY_TRACE) job.traceContext = traceContext;
+    if (abortSignalId !== undefined) job.abortSignalId = abortSignalId;
+
     return this.pool!.execute<T>(
+      job,
       {
-        jobId: nextId(),
-        serviceName,
-        methodName,
-        args,
         priority: options.priority ?? defaults.priority,
         timeout: options.timeout ?? defaults.timeout,
-        retry: options.retry ?? defaults.retry ?? 0,
-        retryDelay: options.retryDelay ?? defaults.retryDelay ?? 0,
-        proxyServices,
-        alsContext: alsContext ?? EMPTY_ALS,
-        traceContext,
-        abortSignalId,
+        retry: options.retry ?? defaults.retry,
+        retryDelay: options.retryDelay ?? defaults.retryDelay,
       },
       options.signal,
     );
@@ -235,9 +247,9 @@ function captureTraceContext(): Record<string, string> {
   __otelApi.propagation.inject(__otelApi.context.active(), carrier);
   // Return the shared empty object when nothing was injected to avoid
   // a per-call structuredClone of an empty object across the worker boundary.
-  for (const _k in carrier) {
-    void _k;
-    return carrier;
+  // Cheaper than Object.keys(carrier).length > 0 — no array allocation.
+  for (const k in carrier) {
+    if (Object.prototype.hasOwnProperty.call(carrier, k)) return carrier;
   }
   return EMPTY_TRACE;
 }

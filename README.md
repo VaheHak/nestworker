@@ -23,6 +23,8 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 
 - **Worker pool** — pre-spawned threads, warmed up before the first request
 - **Zero cold start** — pool initialises on `onModuleInit`, not on the first call
+- **Per-worker concurrency** — opt-in pipelining (`concurrency > 1`) keeps each worker busy across awaits and short tasks
+- **Automatic message batching** — jobs and results are coalesced into a single `postMessage` per scheduling pass, amortising `structuredClone` overhead
 - **Priority queue** — `HIGH / NORMAL / LOW`, binary-search sorted; no jobs are ever dropped
 - **Decorator discovery** — `@WorkerClass` + `@WorkerTask` replace all manual registration
 - **deps** — services serialised into the worker via `vm.runInContext()` + snapshot; use for plain config/data helpers
@@ -151,6 +153,7 @@ export class ImageController {
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `poolSize` | `number` | `os.cpus().length` | Worker thread count |
+| `concurrency` | `number` | `1` | Max in-flight jobs **per worker**. Set `> 1` to pipeline jobs so workers don't sit idle between results, or while a task is awaiting I/O (proxy IPC, `fetch`, `fs`, …). Keep at `1` for purely CPU-bound, fully blocking tasks. |
 | `shutdownTimeout` | `number` | `30_000` | Ms to wait for in-flight jobs on shutdown |
 | `asyncLocalStorages` | `AsyncLocalStorage[]` | `[]` | ALS instances to propagate into workers |
 
@@ -544,6 +547,36 @@ await Promise.all([
 ]);
 // Execution order: HIGH → HIGH → NORMAL → LOW
 ```
+
+---
+
+## Per-Worker Concurrency
+
+By default each worker processes one job at a time. When tasks are short, or
+they `await` I/O (proxy IPC round-trips, `fetch`, `fs`, queue calls), the worker
+sits idle while the main thread processes the previous result. Set
+`concurrency > 1` to pipeline jobs into each worker and keep them saturated:
+
+```ts
+WorkerModule.forRoot({
+  poolSize:    4,   // 4 worker threads
+  concurrency: 8,   // up to 8 in-flight jobs per worker → 32 concurrent jobs
+})
+```
+
+Guidance:
+
+- **CPU-bound, fully blocking tasks** → keep at `1`. Extra concurrency cannot
+  help when the JS thread never yields.
+- **Short tasks (sub-millisecond)** → `2–4` is usually enough to hide the
+  per-job postMessage cost.
+- **Tasks awaiting I/O or proxy calls** → match `concurrency` to your typical
+  in-flight wait depth (e.g. `8–32`).
+
+Internally the pool also coalesces every job it dispatches in a single
+scheduling pass into one `postMessage` envelope per worker, and the worker
+flushes accumulated results once per microtask tick. Batching is automatic —
+there is nothing to configure.
 
 ---
 

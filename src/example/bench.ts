@@ -23,9 +23,11 @@ import { ImageService } from './image.service';
 const TASKS = Number(process.env.TASKS ?? 5_000);
 const POOL = Number(process.env.POOL ?? os.cpus().length);
 const WARMUP = Number(process.env.WARMUP ?? 200);
+const CONCURRENCY = Number(process.env.CONCURRENCY ?? 1);
+const METHOD = process.env.METHOD ?? 'moduleRequire';
 
 @Module({
-  imports: [WorkerModule.forRoot({ poolSize: POOL, shutdownTimeout: 5_000 })],
+  imports: [WorkerModule.forRoot({ poolSize: POOL, concurrency: CONCURRENCY, shutdownTimeout: 5_000 })],
   providers: [ConfigService, ImageService],
 })
 class BenchModule {}
@@ -37,20 +39,20 @@ function pct(sorted: number[], p: number): number {
 }
 
 async function run(): Promise<void> {
-  console.log(`▶ bench: tasks=${TASKS} pool=${POOL} warmup=${WARMUP}`);
+  console.log(`▶ bench: tasks=${TASKS} pool=${POOL} concurrency=${CONCURRENCY} method=${METHOD} warmup=${WARMUP}`);
 
   const t0 = performance.now();
   const app = await NestFactory.createApplicationContext(BenchModule, { logger: false });
   const ws = app.get(WorkerService);
 
   // Cold-start: first task forces pool readiness.
-  await ws.run('ImageService', 'moduleRequire');
+  await ws.run('ImageService', METHOD);
   const cold = performance.now() - t0;
   console.log(`  cold-start: ${cold.toFixed(1)} ms`);
 
   // Warm-up — JIT, MessagePort priming, etc.
   await Promise.all(
-    Array.from({ length: WARMUP }, () => ws.run('ImageService', 'moduleRequire')),
+    Array.from({ length: WARMUP }, () => ws.run('ImageService', METHOD)),
   );
 
   // Measured run — uses the cheapest task (cached require) so we measure
@@ -59,11 +61,10 @@ async function run(): Promise<void> {
   const start = performance.now();
 
   await Promise.all(
-    Array.from({ length: TASKS }, (_, i) => {
+    Array.from({ length: TASKS }, async (_, i) => {
       const t = performance.now();
-      return ws.run('ImageService', 'moduleRequire').then(() => {
-        latencies[i] = performance.now() - t;
-      });
+      await ws.run('ImageService', METHOD);
+      latencies[i] = performance.now() - t;
     }),
   );
 

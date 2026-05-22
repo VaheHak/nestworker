@@ -38,6 +38,12 @@ export class ImageService {
     return `Require os size ${os.cpus().length}`;
   }
 
+  /** Cheapest possible task — pure IPC overhead measurement. */
+  @WorkerTask()
+  noop(): number {
+    return 1;
+  }
+
   @WorkerTask()
   async outlineModule(): Promise<{ p: number, f: number }> {
     const p = await fs.readFile('./package.json', 'utf-8');

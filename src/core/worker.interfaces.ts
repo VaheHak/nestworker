@@ -2,33 +2,34 @@ import type { AsyncLocalStorage } from 'node:async_hooks';
 
 export type TaskPriority = 'HIGH' | 'NORMAL' | 'LOW';
 
+
 // ── Job (main → worker) ───────────────────────────────────────────────────
+//
+// IMPORTANT: only fields the worker actually reads belong here. Everything
+// else (priority, timeout, retry, retryDelay, attempt) lives on PendingTask
+// in worker.pool.ts and never crosses the postMessage boundary — that keeps
+// the structuredClone payload as small as possible on the hot path.
 
 export interface WorkerJob {
-  jobId: string;
+  jobId: number;
   serviceName: string;
   methodName: string;
   args: unknown[];
-  priority: TaskPriority;
-  timeout?: number;
-  /** Retry policy — sourced from @WorkerTask or overridden per call */
-  retry?: number;
-  retryDelay?: number;
-  /** Current attempt index (0 = first attempt) */
-  attempt?: number;
   proxyServices?: ProxyServiceDescriptor[];
   /** ALS context snapshot — restored in worker before task runs */
   alsContext?: Record<string, unknown>;
   /** OTEL trace context — W3C traceparent/tracestate headers */
   traceContext?: Record<string, string>;
   /** AbortSignal is non-transferable; we send the signal ID instead */
-  abortSignalId?: string;
+  abortSignalId?: number;
 }
 
 // ── Job result (worker → main) ────────────────────────────────────────────
 
 export interface WorkerResult<T = unknown> {
   type: 'result';
+  /** ID of the job this result is for (required when concurrency > 1) */
+  jobId?: number;
   ok: boolean;
   data?: T;
   error?: SerializedError;
@@ -47,7 +48,7 @@ export interface SerializedError {
 
 export interface WorkerAbortMessage {
   type: 'abort';
-  abortSignalId: string;
+  abortSignalId: number;
 }
 
 // ── Proxy service descriptor ──────────────────────────────────────────────
@@ -61,7 +62,7 @@ export interface ProxyServiceDescriptor {
 
 export interface IpcInvokeRequest {
   type: 'ipc:invoke';
-  callId: string;
+  callId: number;
   propertyKey: string;
   methodName: string;
   args: unknown[];
@@ -69,7 +70,7 @@ export interface IpcInvokeRequest {
 
 export interface IpcInvokeResponse {
   type: 'ipc:result';
-  callId: string;
+  callId: number;
   ok: boolean;
   data?: unknown;
   error?: string;
@@ -81,22 +82,42 @@ export interface WorkerReadySignal {
   type: 'worker:ready';
 }
 
+// ── Batched job/result envelopes ──────────────────────────────────────────
+//
+// To break the per-message structuredClone overhead ceiling we coalesce
+// multiple jobs/results into a single postMessage. Batching is automatic:
+// the pool packs everything it dispatches in a single schedule pass into
+// one envelope per worker, and the worker flushes accumulated results once
+// per microtask tick.
+
+export interface WorkerJobBatch {
+  type: 'batch';
+  jobs: WorkerJob[];
+}
+
+export interface WorkerResultBatch {
+  type: 'results';
+  results: WorkerResult[];
+}
+
 // ── Discriminated union message types ─────────────────────────────────────
 
 export type WorkerInboundMessage =
   | WorkerJob
+  | WorkerJobBatch
   | IpcInvokeResponse
   | WorkerAbortMessage;
 
 export type WorkerOutboundMessage =
   | WorkerResult
+  | WorkerResultBatch
   | IpcInvokeRequest
   | WorkerReadySignal;
 
 // ── Dead letter event ─────────────────────────────────────────────────────
 
 export interface DeadLetterEvent {
-  jobId: string;
+  jobId: number;
   serviceName: string;
   methodName: string;
   args: unknown[];
@@ -132,6 +153,18 @@ export interface ProxyInstance {
 export interface WorkerModuleOptions {
   /** Number of worker threads. Defaults to os.cpus().length */
   poolSize?: number;
+  /**
+   * Maximum number of in-flight jobs per worker. Defaults to 1.
+   *
+   * Set > 1 to pipeline jobs into each worker: the main thread will keep
+   * dispatching to a worker as long as its in-flight count is below this
+   * limit, so the worker never sits idle between jobs while the main thread
+   * is processing a result. Significant throughput win for short tasks and
+   * for tasks that await I/O (proxy IPC, fetch, fs, ...).
+   *
+   * Safe to keep at 1 for purely CPU-bound, blocking tasks.
+   */
+  concurrency?: number;
   /**
    * How long (ms) to wait for in-flight jobs to finish before force-killing
    * workers on application shutdown. Defaults to 30_000.
