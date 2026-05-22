@@ -59,7 +59,7 @@ async function bootstrap() {
   console.time('concurrent');
   const results = await Promise.allSettled([
     workerService.run<number>('ImageService', 'resizeImage', [1], { priority: 'LOW' }),
-    workerService.run<number>('ImageService', 'resizeImage', [2], { priority: 'LOW', timeout: 100 }),
+    workerService.run<number>('ImageService', 'resizeImage', [2], { priority: 'LOW', timeout: 1000 }),
     workerService.run<string>('ImageService', 'generateThumbnail', [640, 480], { priority: 'HIGH' }),
     workerService.run<string>('ImageService', 'moduleImport'),
     workerService.run<string>('ImageService', 'moduleRequire'),

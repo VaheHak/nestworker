@@ -17,13 +17,29 @@ import type {
 
 const services: SerializedService[] = workerData?.services ?? [];
 const container = new WorkerContainer();
-container.load(services);
 
 type ServiceInstance = Record<string, (...args: unknown[]) => unknown>;
 
 const instances = new Map<string, ServiceInstance>();
-for (const svc of services) {
-  instances.set(svc.name, container.get<ServiceInstance>(svc.name));
+// Index services by name so we can lazily reconstruct each one the first
+// time a job for it arrives. Loading ALL services synchronously before
+// sending `worker:ready` delays the pool from dispatching ANY work to this
+// worker — which is catastrophic for cold-burst throughput when many
+// workers spawn together. Lazy loading lets the pool start dispatching
+// immediately; each service pays its `vm.runInContext` cost on its first
+// invocation and is cached for every subsequent call.
+const servicesByName = new Map<string, SerializedService>();
+for (const svc of services) servicesByName.set(svc.name, svc);
+
+function getInstance(name: string): ServiceInstance | undefined {
+  let inst = instances.get(name);
+  if (inst !== undefined) return inst;
+  const svc = servicesByName.get(name);
+  if (svc === undefined) return undefined;
+  container.load([svc]);
+  inst = container.get<ServiceInstance>(svc.name);
+  instances.set(svc.name, inst);
+  return inst;
 }
 
 // Stash parentPort once — `parentPort` is a module getter; caching the
@@ -75,7 +91,17 @@ port.on('message', (msg: unknown) => {
   if (t === 'batch') {
     const batch = message as WorkerJobBatch;
     const jobs = batch.jobs;
-    for (let i = 0; i < jobs.length; i++) runJob(jobs[i]);
+    forceBuffer = true;
+    try {
+      for (let i = 0; i < jobs.length; i++) runJob(jobs[i]);
+    } finally {
+      forceBuffer = false;
+    }
+    // Flush any sync results we accumulated during the loop as one envelope.
+    if (resultBuffer.length > 0) {
+      flushScheduled = true; // suppress the queued microtask flush
+      flushResults();
+    }
     return;
   }
 
@@ -132,6 +158,11 @@ let __callCounter = 0;
 
 const resultBuffer: WorkerResult[] = [];
 let flushScheduled = false;
+// When true, postResult always buffers (we're inside a batch loop and want
+// every sync-resolved result of that batch to coalesce into one postMessage).
+// When false (the steady-state concurrency=1 round-trip path), the FIRST
+// result of the tick is posted immediately and only subsequent ones buffer.
+let forceBuffer = false;
 
 function scheduleFlush(): void {
   if (flushScheduled) return;
@@ -157,34 +188,41 @@ function flushResults(): void {
 }
 
 function postResult(res: WorkerResult): void {
+  // Fast path: outside any batch loop, no flush pending, buffer empty.
+  // This is the steady-state case for single-job dispatches (concurrency=1):
+  // sending immediately removes a full microtask hop from the round-trip.
+  // Any later results arriving in the SAME tick will queue and flush as
+  // a batch as usual.
+  if (!forceBuffer && !flushScheduled && resultBuffer.length === 0) {
+    port.postMessage(res);
+    return;
+  }
   resultBuffer.push(res);
   scheduleFlush();
 }
 
 function runJob(job: WorkerJob): void {
-  // Inject proxy stubs the first time we see a (service, propertyKey) pair.
-  // Proxies are static per service — re-mutating per job was wasted work.
-  const proxyServices = job.proxyServices;
-  if (proxyServices && proxyServices.length > 0) {
-    const inst = instances.get(job.serviceName);
-    if (inst) {
-      for (let i = 0; i < proxyServices.length; i++) {
-        const d = proxyServices[i];
-        const key = job.serviceName + ':' + d.propertyKey;
-        if (!proxiesInstalled.has(key)) {
-          inst[d.propertyKey] = buildProxy(d) as unknown as (...args: unknown[]) => unknown;
-          proxiesInstalled.add(key);
-        }
-      }
-    }
-  }
-
   const jobId = job.jobId;
-  const inst = instances.get(job.serviceName);
+  const inst = getInstance(job.serviceName);
   if (!inst) {
     postError(jobId, new Error(`Service "${job.serviceName}" is not registered`));
     return;
   }
+
+  // Inject proxy stubs the first time we see a (service, propertyKey) pair.
+  // Proxies are static per service — re-mutating per job was wasted work.
+  const proxyServices = job.proxyServices;
+  if (proxyServices !== undefined && proxyServices.length > 0) {
+    for (let i = 0; i < proxyServices.length; i++) {
+      const d = proxyServices[i];
+      const key = job.serviceName + ':' + d.propertyKey;
+      if (!proxiesInstalled.has(key)) {
+        inst[d.propertyKey] = buildProxy(d) as unknown as (...args: unknown[]) => unknown;
+        proxiesInstalled.add(key);
+      }
+    }
+  }
+
   const fn = inst[job.methodName];
   if (typeof fn !== 'function') {
     postError(jobId, new Error(`Task "${job.serviceName}.${job.methodName}" is not registered`));
@@ -192,25 +230,28 @@ function runJob(job: WorkerJob): void {
   }
 
   const abortSignalId = job.abortSignalId;
+  const args = job.args;
   let abortController: AbortController | undefined;
-  let args = job.args;
+  let callArgs: unknown[] = args;
   if (abortSignalId !== undefined) {
     abortController = new AbortController();
     pendingAborts.set(abortSignalId, abortController);
-    args = [...job.args, abortController.signal];
+    callArgs = [...args, abortController.signal];
   }
-
-  const finish = () => {
-    if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
-  };
-
-  const exec = (): unknown => inst[job.methodName](...args);
 
   try {
     const alsContext = job.alsContext;
-    const result = alsContext !== undefined
-      ? workerAls.run(alsContext, exec)
-      : exec();
+    // Common path: no ALS — call fn directly with `inst` as `this`.
+    let result: unknown;
+    if (alsContext === undefined) {
+      // .apply is faster than spread when callArgs is the original array,
+      // and avoids an allocation on the no-abort path.
+      result = (fn as (...a: unknown[]) => unknown).apply(inst, callArgs);
+    } else {
+      result = workerAls.run(alsContext, () =>
+        (fn as (...a: unknown[]) => unknown).apply(inst, callArgs),
+      );
+    }
 
     // Sync fast path: avoid Promise allocation + microtask roundtrip when
     // the task returned a plain value.
@@ -219,22 +260,22 @@ function runJob(job: WorkerJob): void {
       typeof result !== 'object' ||
       typeof (result as { then?: unknown }).then !== 'function'
     ) {
-      finish();
+      if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
       postResult({ type: 'result', ok: true, data: result, jobId });
       return;
     }
     (result as Promise<unknown>).then(
       (data) => {
-        finish();
+        if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
         postResult({ type: 'result', ok: true, data, jobId });
       },
       (error: unknown) => {
-        finish();
+        if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
         postError(jobId, error);
       },
     );
   } catch (error: unknown) {
-    finish();
+    if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
     postError(jobId, error);
   }
 }

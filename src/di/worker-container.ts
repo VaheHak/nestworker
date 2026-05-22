@@ -49,6 +49,13 @@ export interface SerializedService {
  * in an isolated vm context. We stub them with a transparent Proxy so
  * decorator calls (@Injectable, @Controller, etc.) at file-eval time
  * become silent no-ops.
+ *
+ * `nestworker` itself is stubbed too: external user services typically
+ * import `WorkerClass` / `WorkerTask` from `'nestworker'`, and re-loading
+ * the entire framework inside every worker (just to no-op the decorators)
+ * adds hundreds of ms per worker on cold start. The decorators only need
+ * to do real work at main-thread discovery time; inside the worker they
+ * can be transparent stubs.
  */
 const NESTJS_STUB_PACKAGES = new Set([
   '@nestjs/common',
@@ -57,7 +64,27 @@ const NESTJS_STUB_PACKAGES = new Set([
   '@nestjs/platform-express',
   '@nestjs/platform-fastify',
   'reflect-metadata',
+  'nestworker',
 ]);
+
+function isStubbedPackage(id: string): boolean {
+  if (NESTJS_STUB_PACKAGES.has(id)) return true;
+  // Also stub subpath imports like 'nestworker/decorators/...' and
+  // '@nestjs/common/decorators/...'.
+  if (id.startsWith('nestworker/') || id.startsWith('@nestjs/')) return true;
+
+  // External compiled providers may inline absolute paths via
+  // require(require.resolve('...')). Detect those too.
+  if (nodePath.isAbsolute(id)) {
+    const p = id.replace(/\\/g, '/');
+    return (
+      p.includes('/node_modules/@nestjs/') ||
+      p.includes('/node_modules/nestworker/') ||
+      p.includes('/node_modules/reflect-metadata/')
+    );
+  }
+  return false;
+}
 
 /**
  * A Proxy that silently absorbs NestJS decorator calls at file-eval time.
@@ -174,7 +201,7 @@ export class WorkerContainer {
 
     const customRequire = nodeModule.createRequire(filePath);
     const sandboxRequire = (id: string): unknown => {
-      if (NESTJS_STUB_PACKAGES.has(id)) return NOOP_STUB;
+      if (isStubbedPackage(id)) return NOOP_STUB;
       return customRequire(id);
     };
 

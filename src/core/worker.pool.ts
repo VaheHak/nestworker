@@ -256,7 +256,7 @@ export class WorkerPool extends EventEmitter {
           state.active.delete(r.jobId!);
           this.completeJob(worker, slot, r);
         }
-        if (!this.destroyed) this.schedule();
+        if (!this.destroyed) this.dispatchNow();
         return;
       }
 
@@ -276,7 +276,7 @@ export class WorkerPool extends EventEmitter {
       }
       if (!slot) return; // late message for an aborted/timed-out task
       this.completeJob(worker, slot, result);
-      if (!this.destroyed) this.schedule();
+      if (!this.destroyed) this.dispatchNow();
     };
 
     worker.on('message', onMessage);
@@ -365,6 +365,58 @@ export class WorkerPool extends EventEmitter {
     if (this.idle.length === 0 || this.queueHead >= this.queue.length) return;
     this.scheduleQueued = true;
     queueMicrotask(this.drain);
+  }
+
+  /**
+   * Synchronous drain used on the COMPLETION path — when a worker becomes
+   * idle as a result of a result message arriving, we want to hand it the
+   * next queued job in the SAME tick. The microtask-deferred `schedule()`
+   * adds a full microtask hop per round-trip, which dominates throughput
+   * for short tasks with concurrency=1.
+   *
+   * Initial-burst dispatch still goes through the deferred `schedule()` so
+   * synchronous floods of `execute()` calls get coalesced into per-worker
+   * batches.
+   */
+  private dispatchNow(): void {
+    if (this.destroyed) return;
+    const idle = this.idle;
+    const q = this.queue;
+    // If a microtask drain is already queued (initial burst still in flight),
+    // let it own the dispatch — running both would race and double-dispatch.
+    if (this.scheduleQueued) return;
+    if (idle.length === 0 || this.queueHead >= q.length) return;
+
+    let batches: Map<Worker, WorkerJob[]> | undefined;
+    while (idle.length > 0 && this.queueHead < q.length) {
+      const worker = idle.pop()!;
+      const task = q[this.queueHead]!;
+      (q as unknown as (PendingTask | undefined)[])[this.queueHead] = undefined;
+      this.queueHead++;
+      if (this.queueHead > 1024 && this.queueHead * 2 > q.length) {
+        q.splice(0, this.queueHead);
+        this.queueHead = 0;
+      }
+      this.prepareDispatch(worker, task);
+      // Fast path for the overwhelmingly common case: ONE worker idle,
+      // ONE job to dispatch. Skip the Map allocation and ship directly.
+      if (batches === undefined && (idle.length === 0 || this.queueHead >= q.length)) {
+        worker.postMessage(task.job);
+        return;
+      }
+      if (batches === undefined) batches = new Map();
+      let arr = batches.get(worker);
+      if (arr === undefined) { arr = []; batches.set(worker, arr); }
+      arr.push(task.job);
+    }
+    if (batches === undefined) return;
+    for (const [worker, jobs] of batches) {
+      if (jobs.length === 1) {
+        worker.postMessage(jobs[0]);
+      } else {
+        worker.postMessage({ type: 'batch', jobs } satisfies WorkerJobBatch);
+      }
+    }
   }
 
   /** Pre-bound for queueMicrotask — avoids closure allocation per schedule. */
