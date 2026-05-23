@@ -198,12 +198,11 @@ export class WorkerContainer {
 
     const source = fs.readFileSync(filePath, 'utf8');
     const mod = { exports: {} as Record<string, unknown> };
+    // Insert into cache before execution so circular local requires can see a
+    // partial export object instead of recursing forever.
+    this.fileCache.set(filePath, mod.exports);
 
-    const customRequire = nodeModule.createRequire(filePath);
-    const sandboxRequire = (id: string): unknown => {
-      if (isStubbedPackage(id)) return NOOP_STUB;
-      return customRequire(id);
-    };
+    const sandboxRequire = this.createSandboxRequire(filePath);
 
     const context = vm.createContext({
       require: sandboxRequire,
@@ -225,6 +224,7 @@ export class WorkerContainer {
       setImmediate,
       clearImmediate,
       Promise,
+      Reflect: createReflectShim(),
       // Make the context's global === the context itself so that
       // `(this && this.__importStar)` patterns resolve to the context global
       // rather than to undefined (as they would in new Function()).
@@ -239,4 +239,70 @@ export class WorkerContainer {
     this.fileCache.set(filePath, mod.exports);
     return mod.exports;
   }
+
+  private createSandboxRequire(parentFilePath: string): (id: string) => unknown {
+    const parentRequire = nodeModule.createRequire(parentFilePath);
+
+    return (id: string): unknown => {
+      if (isStubbedPackage(id)) return NOOP_STUB;
+
+      // Re-export chains like `index.js -> require('./service.js')` must stay
+      // in this vm loader; otherwise nested files execute in native Node and
+      // bypass our NestJS/reflect stubs.
+      const resolved = this.tryResolve(parentRequire, id);
+      if (resolved && shouldSandboxResolvedPath(resolved)) {
+        return this.runFile(resolved);
+      }
+
+      return parentRequire(id);
+    };
+  }
+
+  private tryResolve(
+    req: NodeJS.Require,
+    id: string,
+  ): string | undefined {
+    try {
+      return req.resolve(id);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function createReflectShim(): typeof Reflect {
+  const shim = Object.create(Reflect) as typeof Reflect & {
+    getMetadata?: (...args: unknown[]) => unknown;
+    defineMetadata?: (...args: unknown[]) => unknown;
+    getOwnMetadata?: (...args: unknown[]) => unknown;
+    hasMetadata?: (...args: unknown[]) => boolean;
+    hasOwnMetadata?: (...args: unknown[]) => boolean;
+    metadata?: (...args: unknown[]) => unknown;
+  };
+
+  if (typeof shim.getMetadata !== 'function') shim.getMetadata = () => undefined;
+  if (typeof shim.defineMetadata !== 'function') shim.defineMetadata = () => undefined;
+  if (typeof shim.getOwnMetadata !== 'function') shim.getOwnMetadata = () => undefined;
+  if (typeof shim.hasMetadata !== 'function') shim.hasMetadata = () => false;
+  if (typeof shim.hasOwnMetadata !== 'function') shim.hasOwnMetadata = () => false;
+  if (typeof shim.metadata !== 'function') shim.metadata = () => () => undefined;
+
+  return shim as typeof Reflect;
+}
+
+function shouldSandboxResolvedPath(resolvedPath: string): boolean {
+  if (!nodePath.isAbsolute(resolvedPath)) return false;
+
+  const p = resolvedPath.replace(/\\/g, '/');
+  const inNodeModules = p.includes('/node_modules/');
+  const inNestTree =
+    p.includes('/node_modules/@nestjs/') ||
+    p.includes('/node_modules/nestworker/') ||
+    p.includes('/node_modules/reflect-metadata/');
+
+  if (inNodeModules && !inNestTree) return false;
+
+  // We only execute CommonJS JS outputs in vm; leave JSON/native addons to
+  // Node's normal loader.
+  return p.endsWith('.js') || p.endsWith('.cjs');
 }
