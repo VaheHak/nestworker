@@ -2,7 +2,10 @@ import { DynamicModule, Module, Provider } from '@nestjs/common';
 import { DiscoveryModule } from '@nestjs/core';
 import { WorkerService } from './worker.service';
 import { WorkerDiscoveryService } from '../discovery/discovery.service';
-import type { WorkerModuleOptions, WorkerModuleAsyncOptions } from './worker.interfaces';
+import type {
+  WorkerModuleOptions,
+  WorkerModuleAsyncOptions,
+} from './worker.interfaces';
 
 @Module({})
 export class WorkerModule {
@@ -50,11 +53,7 @@ export class WorkerModule {
       module: WorkerModule,
       global: true,
       imports: [DiscoveryModule],
-      providers: [
-        optionsProvider,
-        WorkerDiscoveryService,
-        WorkerService,
-      ],
+      providers: [optionsProvider, WorkerDiscoveryService, WorkerService],
       exports: [WorkerService],
     };
   }

@@ -2,7 +2,6 @@ import type { AsyncLocalStorage } from 'node:async_hooks';
 
 export type TaskPriority = 'HIGH' | 'NORMAL' | 'LOW';
 
-
 // ── Job (main → worker) ───────────────────────────────────────────────────
 //
 // IMPORTANT: only fields the worker actually reads belong here. Everything
@@ -179,7 +178,9 @@ export interface WorkerModuleOptions {
 
 export interface WorkerModuleAsyncOptions {
   inject?: unknown[];
-  useFactory: (...args: unknown[]) => WorkerModuleOptions | Promise<WorkerModuleOptions>;
+  useFactory: (
+    ...args: unknown[]
+  ) => WorkerModuleOptions | Promise<WorkerModuleOptions>;
 }
 
 // ── Pool stats (for health + metrics) ─────────────────────────────────────

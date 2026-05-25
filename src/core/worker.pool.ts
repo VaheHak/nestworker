@@ -48,9 +48,15 @@ export declare interface WorkerPool {
 
   on(event: 'taskStart', listener: (job: WorkerJob) => void): this;
 
-  on(event: 'taskEnd', listener: (job: WorkerJob, durationMs: number) => void): this;
+  on(
+    event: 'taskEnd',
+    listener: (job: WorkerJob, durationMs: number) => void,
+  ): this;
 
-  on(event: 'taskError', listener: (job: WorkerJob, error: SerializedError) => void): this;
+  on(
+    event: 'taskError',
+    listener: (job: WorkerJob, error: SerializedError) => void,
+  ): this;
 
   emit(event: 'dead', payload: DeadLetterEvent): boolean;
 
@@ -138,10 +144,16 @@ export class WorkerPool extends EventEmitter {
 
   execute<T = unknown>(
     job: WorkerJob,
-    meta: { priority: TaskPriority; timeout?: number; retry?: number; retryDelay?: number },
+    meta: {
+      priority: TaskPriority;
+      timeout?: number;
+      retry?: number;
+      retryDelay?: number;
+    },
     signal?: AbortSignal,
   ): Promise<T> {
-    if (this.destroyed) return Promise.reject(new Error('WorkerPool destroyed'));
+    if (this.destroyed)
+      return Promise.reject(new Error('WorkerPool destroyed'));
 
     return new Promise<T>((resolve, reject) => {
       // Reject immediately if already aborted
@@ -163,32 +175,44 @@ export class WorkerPool extends EventEmitter {
       };
 
       if (signal) {
-        signal.addEventListener('abort', () => {
-          // Remove from queue if not yet dispatched. Use head-index aware
-          // search and tombstone with `undefined` to avoid an O(n) splice.
-          const q = this.queue;
-          for (let i = this.queueHead; i < q.length; i++) {
-            if (q[i] === task) {
-              (q as unknown as (PendingTask | undefined)[])[i] = undefined as never;
-              // If it's at the head, advance past it.
-              while (this.queueHead < q.length && q[this.queueHead] === undefined) {
-                this.queueHead++;
-              }
-              reject(new DOMException('Task aborted', 'AbortError'));
-              return;
-            }
-          }
-          // Already running — send abort signal to worker
-          if (job.abortSignalId !== undefined) {
-            const worker = this.signalWorkerMap.get(job.abortSignalId);
-            if (worker) {
-              try {
-                worker.postMessage({ type: 'abort', abortSignalId: job.abortSignalId });
-              } catch { /* worker gone */
+        signal.addEventListener(
+          'abort',
+          () => {
+            // Remove from queue if not yet dispatched. Use head-index aware
+            // search and tombstone with `undefined` to avoid an O(n) splice.
+            const q = this.queue;
+            for (let i = this.queueHead; i < q.length; i++) {
+              if (q[i] === task) {
+                (q as unknown as (PendingTask | undefined)[])[i] =
+                  undefined as never;
+                // If it's at the head, advance past it.
+                while (
+                  this.queueHead < q.length &&
+                  q[this.queueHead] === undefined
+                ) {
+                  this.queueHead++;
+                }
+                reject(new DOMException('Task aborted', 'AbortError'));
+                return;
               }
             }
-          }
-        }, { once: true });
+            // Already running — send abort signal to worker
+            if (job.abortSignalId !== undefined) {
+              const worker = this.signalWorkerMap.get(job.abortSignalId);
+              if (worker) {
+                try {
+                  worker.postMessage({
+                    type: 'abort',
+                    abortSignalId: job.abortSignalId,
+                  });
+                } catch {
+                  /* worker gone */
+                }
+              }
+            }
+          },
+          { once: true },
+        );
       }
 
       this.enqueue(task);
@@ -209,9 +233,13 @@ export class WorkerPool extends EventEmitter {
   private spawnWorker(): Worker {
     const worker = new Worker(
       path.resolve(__dirname, '../worker/worker-runtime.js'),
-      { workerData: { services: this.services } },
+      {
+        workerData: { services: this.services },
+      },
     );
-    (worker as unknown as { [STATE]: WorkerState })[STATE] = { active: new Map() };
+    (worker as unknown as { [STATE]: WorkerState })[STATE] = {
+      active: new Map(),
+    };
     this.workers.push(worker);
     this.warmingUp.add(worker);
 
@@ -251,7 +279,8 @@ export class WorkerPool extends EventEmitter {
         const results = batch.results;
         for (let i = 0; i < results.length; i++) {
           const r = results[i];
-          const slot = r.jobId !== undefined ? state.active.get(r.jobId) : undefined;
+          const slot =
+            r.jobId !== undefined ? state.active.get(r.jobId) : undefined;
           if (!slot) continue;
           state.active.delete(r.jobId!);
           this.completeJob(worker, slot, r);
@@ -293,16 +322,23 @@ export class WorkerPool extends EventEmitter {
       } catch {
         try {
           worker.postMessage({
-            type: 'ipc:result', callId: res.callId, ok: false,
-            error: `IPC result for "${req.propertyKey}.${req.methodName}" ` +
+            type: 'ipc:result',
+            callId: res.callId,
+            ok: false,
+            error:
+              `IPC result for "${req.propertyKey}.${req.methodName}" ` +
               `is not structuredClone-compatible.`,
           } satisfies IpcInvokeResponse);
-        } catch { /* worker gone */ }
+        } catch {
+          /* worker gone */
+        }
       }
     };
     if (!svcInstance) {
       reply({
-        type: 'ipc:result', callId: req.callId, ok: false,
+        type: 'ipc:result',
+        callId: req.callId,
+        ok: false,
         error: `No proxy registered for "${req.propertyKey}"`,
       });
       return;
@@ -310,7 +346,9 @@ export class WorkerPool extends EventEmitter {
     const method = svcInstance[req.methodName];
     if (typeof method !== 'function') {
       reply({
-        type: 'ipc:result', callId: req.callId, ok: false,
+        type: 'ipc:result',
+        callId: req.callId,
+        ok: false,
         error: `Method "${req.methodName}" not found on "${req.propertyKey}"`,
       });
       return;
@@ -320,22 +358,32 @@ export class WorkerPool extends EventEmitter {
       p = svcInstance[req.methodName](...(req.args as unknown[]));
     } catch (err: unknown) {
       reply({
-        type: 'ipc:result', callId: req.callId, ok: false,
+        type: 'ipc:result',
+        callId: req.callId,
+        ok: false,
         error: (err as Error).message ?? String(err),
       });
       return;
     }
     // Sync fast path for proxies that return plain values.
-    if (p === null || typeof p !== 'object' || typeof (p as { then?: unknown }).then !== 'function') {
+    if (
+      p === null ||
+      typeof p !== 'object' ||
+      typeof (p as { then?: unknown }).then !== 'function'
+    ) {
       reply({ type: 'ipc:result', callId: req.callId, ok: true, data: p });
       return;
     }
     Promise.resolve(p).then(
-      (data) => reply({ type: 'ipc:result', callId: req.callId, ok: true, data }),
-      (err: unknown) => reply({
-        type: 'ipc:result', callId: req.callId, ok: false,
-        error: (err as Error).message ?? String(err),
-      }),
+      (data) =>
+        reply({ type: 'ipc:result', callId: req.callId, ok: true, data }),
+      (err: unknown) =>
+        reply({
+          type: 'ipc:result',
+          callId: req.callId,
+          ok: false,
+          error: (err as Error).message ?? String(err),
+        }),
     );
   }
 
@@ -351,7 +399,8 @@ export class WorkerPool extends EventEmitter {
       return;
     }
     // Binary search over the live region [head, n) for the insertion point.
-    let lo = head, hi = n;
+    let lo = head,
+      hi = n;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
       if (PRIORITY_WEIGHT[q[mid].priority] < weight) hi = mid;
@@ -400,13 +449,19 @@ export class WorkerPool extends EventEmitter {
       this.prepareDispatch(worker, task);
       // Fast path for the overwhelmingly common case: ONE worker idle,
       // ONE job to dispatch. Skip the Map allocation and ship directly.
-      if (batches === undefined && (idle.length === 0 || this.queueHead >= q.length)) {
+      if (
+        batches === undefined &&
+        (idle.length === 0 || this.queueHead >= q.length)
+      ) {
         worker.postMessage(task.job);
         return;
       }
       if (batches === undefined) batches = new Map();
       let arr = batches.get(worker);
-      if (arr === undefined) { arr = []; batches.set(worker, arr); }
+      if (arr === undefined) {
+        arr = [];
+        batches.set(worker, arr);
+      }
       arr.push(task.job);
     }
     if (batches === undefined) return;
@@ -441,7 +496,10 @@ export class WorkerPool extends EventEmitter {
       this.prepareDispatch(worker, task);
       if (!batches) batches = new Map();
       let arr = batches.get(worker);
-      if (!arr) { arr = []; batches.set(worker, arr); }
+      if (!arr) {
+        arr = [];
+        batches.set(worker, arr);
+      }
       arr.push(task.job);
     }
     if (!batches) return;
@@ -475,12 +533,19 @@ export class WorkerPool extends EventEmitter {
     if (this.listenerCount('taskStart') > 0) this.emit('taskStart', task.job);
 
     if (task.timeout && task.timeout > 0) {
-      slot.timeoutHandle = setTimeout(() => this.handleTimeout(worker, slot), task.timeout);
+      slot.timeoutHandle = setTimeout(
+        () => this.handleTimeout(worker, slot),
+        task.timeout,
+      );
     }
   }
 
   /** Called from the persistent message listener when a job result arrives. */
-  private completeJob(worker: Worker, slot: ActiveSlot, result: WorkerResult): void {
+  private completeJob(
+    worker: Worker,
+    slot: ActiveSlot,
+    result: WorkerResult,
+  ): void {
     if (slot.settled) return;
     slot.settled = true;
     if (slot.timeoutHandle) clearTimeout(slot.timeoutHandle);
@@ -494,10 +559,13 @@ export class WorkerPool extends EventEmitter {
       }
       slot.task.resolve(result.data);
     } else {
-      this.handleFailure(slot.task, result.error ?? {
-        name: 'Error',
-        message: 'Unknown worker error',
-      });
+      this.handleFailure(
+        slot.task,
+        result.error ?? {
+          name: 'Error',
+          message: 'Unknown worker error',
+        },
+      );
     }
 
     // Give the slot back to the pool. Scheduling is the *caller*'s job so
@@ -509,7 +577,10 @@ export class WorkerPool extends EventEmitter {
     }
   }
 
-  private handleFailure(task: PendingTask, serializedError: SerializedError): void {
+  private handleFailure(
+    task: PendingTask,
+    serializedError: SerializedError,
+  ): void {
     const retry = task.retry ?? 0;
     const retryDelay = task.retryDelay ?? 0;
     if (this.listenerCount('taskError') > 0) {
@@ -550,7 +621,8 @@ export class WorkerPool extends EventEmitter {
 
     this.handleFailure(slot.task, {
       name: 'TimeoutError',
-      message: `Task "${slot.task.job.serviceName}.${slot.task.job.methodName}" ` +
+      message:
+        `Task "${slot.task.job.serviceName}.${slot.task.job.methodName}" ` +
         `timed out after ${slot.task.timeout}ms`,
     });
 
@@ -558,7 +630,9 @@ export class WorkerPool extends EventEmitter {
     // replace it. All other in-flight jobs on this worker fail too.
     try {
       await worker.terminate();
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     this.replaceWorker(worker);
     this.schedule();
   }
@@ -573,7 +647,9 @@ export class WorkerPool extends EventEmitter {
         const sigId = slot.task.job.abortSignalId;
         if (sigId !== undefined) this.signalWorkerMap.delete(sigId);
         const { serviceName, methodName } = slot.task.job;
-        const wrapped = new Error(`Worker crashed in "${serviceName}.${methodName}": ${err.message}`);
+        const wrapped = new Error(
+          `Worker crashed in "${serviceName}.${methodName}": ${err.message}`,
+        );
         wrapped.stack = err.stack;
         this.emit('error', wrapped, slot.task.job);
         slot.task.reject(wrapped);
@@ -594,10 +670,12 @@ export class WorkerPool extends EventEmitter {
         if (slot.timeoutHandle) clearTimeout(slot.timeoutHandle);
         const sigId = slot.task.job.abortSignalId;
         if (sigId !== undefined) this.signalWorkerMap.delete(sigId);
-        slot.task.reject(new Error(
-          `Worker exited with code ${code} while running ` +
-          `"${slot.task.job.serviceName}.${slot.task.job.methodName}"`,
-        ));
+        slot.task.reject(
+          new Error(
+            `Worker exited with code ${code} while running ` +
+              `"${slot.task.job.serviceName}.${slot.task.job.methodName}"`,
+          ),
+        );
         this.activeCount--;
       }
       state.active.clear();
@@ -637,18 +715,19 @@ export class WorkerPool extends EventEmitter {
       await Promise.race([
         Promise.allSettled(
           activeTasks.map(
-            (task) => new Promise<void>((res) => {
-              const orig = task.resolve;
-              const origRej = task.reject;
-              task.resolve = (v) => {
-                orig(v);
-                res();
-              };
-              task.reject = (e) => {
-                origRej(e);
-                res();
-              };
-            }),
+            (task) =>
+              new Promise<void>((res) => {
+                const orig = task.resolve;
+                const origRej = task.reject;
+                task.resolve = (v) => {
+                  orig(v);
+                  res();
+                };
+                task.reject = (e) => {
+                  origRej(e);
+                  res();
+                };
+              }),
           ),
         ),
         new Promise<void>((res) => setTimeout(res, this.shutdownTimeout)),

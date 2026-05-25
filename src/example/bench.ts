@@ -27,22 +27,35 @@ const CONCURRENCY = Number(process.env.CONCURRENCY ?? 1);
 const METHOD = process.env.METHOD ?? 'moduleRequire';
 
 @Module({
-  imports: [WorkerModule.forRoot({ poolSize: POOL, concurrency: CONCURRENCY, shutdownTimeout: 5_000 })],
+  imports: [
+    WorkerModule.forRoot({
+      poolSize: POOL,
+      concurrency: CONCURRENCY,
+      shutdownTimeout: 5_000,
+    }),
+  ],
   providers: [ConfigService, ImageService],
 })
 class BenchModule {}
 
 function pct(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
-  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  const idx = Math.min(
+    sorted.length - 1,
+    Math.floor((p / 100) * sorted.length),
+  );
   return sorted[idx];
 }
 
 async function run(): Promise<void> {
-  console.log(`▶ bench: tasks=${TASKS} pool=${POOL} concurrency=${CONCURRENCY} method=${METHOD} warmup=${WARMUP}`);
+  console.log(
+    `▶ bench: tasks=${TASKS} pool=${POOL} concurrency=${CONCURRENCY} method=${METHOD} warmup=${WARMUP}`,
+  );
 
   const t0 = performance.now();
-  const app = await NestFactory.createApplicationContext(BenchModule, { logger: false });
+  const app = await NestFactory.createApplicationContext(BenchModule, {
+    logger: false,
+  });
   const ws = app.get(WorkerService);
 
   // Cold-start: first task forces pool readiness.
@@ -85,5 +98,3 @@ run().catch((err) => {
   console.error('Bench failed:', err);
   process.exit(1);
 });
-
-

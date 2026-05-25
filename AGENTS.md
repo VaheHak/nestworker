@@ -5,6 +5,7 @@ NestJS module that runs `@WorkerTask`-decorated methods in a managed `worker_thr
 ## Architecture (read these to understand the data flow)
 
 Main thread → worker thread pipeline:
+
 1. `core/worker.module.ts` — `WorkerModule.forRoot(...)` / `forRootAsync(...)` registers a **global** module that imports `DiscoveryModule` and provides `WorkerService` + `WorkerDiscoveryService` + a `'WORKER_OPTIONS'` token. Options include `poolSize`, `concurrency` (per-worker in-flight cap, default 1), `shutdownTimeout`, `asyncLocalStorages`.
 2. `discovery/discovery.service.ts` — on `onModuleInit`, walks `ModulesContainer` for providers carrying `WORKER_CLASS_META`, collects methods with `WORKER_METHOD_META`, resolves `deps` and `proxy` tokens via `moduleRef.get(token, { strict: false })`, returns `DiscoveredTask[]`.
 3. `di/di-serializer.ts` — `serializeForWorker(tasks)` turns each task into a `SerializedService` containing the **absolute path** to the compiled `.js` file (looked up via `require.cache`) plus a `structuredClone` snapshot of each dep's own properties. This is passed via `workerData`.
@@ -54,4 +55,3 @@ When adding new outbound message paths, **reuse `postResult`** if the message re
 - Adding a new message type → extend `WorkerInboundMessage` / `WorkerOutboundMessage` discriminated unions, branch on `message.type` in both `worker-runtime.ts`'s `port.on('message')` and `worker.pool.ts`'s `onMessage`, and remember to handle the **batched** form too if the message is a job result (use `postResult` so it joins the existing flush loop).
 - Adding NestJS-ecosystem packages that workers might transitively import → add them to `NESTJS_STUB_PACKAGES` in `worker-container.ts` so decorator evaluation stays a no-op.
 - Adding a new per-worker resource → attach it to the `WorkerState` returned by `getState(worker)` rather than allocating a parallel `WeakMap`, and clean it up in `handleWorkerError` / `handleWorkerExit` / `replaceWorker`.
-

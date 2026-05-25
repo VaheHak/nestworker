@@ -1,5 +1,9 @@
 import type { DiscoveredTask } from '../core/worker.interfaces';
-import type { SerializedDep, SerializedMethod, SerializedService } from './worker-container';
+import type {
+  SerializedDep,
+  SerializedMethod,
+  SerializedService,
+} from './worker-container';
 import { WORKER_DEPS_META } from '../decorators/worker-task.decorator';
 
 /**
@@ -18,7 +22,9 @@ import { WORKER_DEPS_META } from '../decorators/worker-task.decorator';
  * that stubs NestJS packages (so decorator calls at file-eval time are
  * silent no-ops) while letting all other imports resolve normally.
  */
-export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[] {
+export function serializeForWorker(
+  tasks: DiscoveredTask[],
+): SerializedService[] {
   const byService = new Map<
     string,
     { representative: DiscoveredTask; methods: SerializedMethod[] }
@@ -101,8 +107,8 @@ function findFilePath(ctor: new (...args: unknown[]) => unknown): string {
   }
   throw new Error(
     `nestworker: could not find compiled file for "${ctor.name}" in require.cache. ` +
-    `Ensure the class is exported from its module file and the project is ` +
-    `compiled (not running via ts-node) before starting.`,
+      `Ensure the class is exported from its module file and the project is ` +
+      `compiled (not running via ts-node) before starting.`,
   );
 }
 
@@ -137,7 +143,9 @@ function snapshotInstance(instance: unknown): Record<string, unknown> {
       // storing `v` would pass a live socket/stream reference into workerData,
       // producing broken objects with missing internal state in the worker.
       out[k] = structuredClone(v);
-    } catch { /* skip non-cloneable values entirely */ }
+    } catch {
+      /* skip non-cloneable values entirely */
+    }
   }
   return out;
 }

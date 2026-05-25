@@ -19,6 +19,43 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 
 ---
 
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+  - [1. Register `WorkerModule`](#1-register-workermodule)
+  - [2. Decorate your service](#2-decorate-your-service)
+  - [3. Call `run()`](#3-call-run)
+- [API](#api)
+  - [`WorkerModule.forRoot(options?)`](#workermoduleforrootoptions)
+  - [`WorkerModule.forRootAsync(options)`](#workermoduleforrootasyncoptions)
+  - [`@WorkerClass(options?)`](#workerclassoptions)
+  - [`@WorkerTask(options?)`](#workertaskoptions)
+  - [`WorkerService.run<T>(serviceName, methodName, args?, options?)`](#workerserviceruntservicename-methodname-args-options)
+  - [`WorkerService` events](#workerservice-events)
+  - [`WorkerService.stats()`](#workerservicestats)
+- [`deps` vs `proxy`](#deps-vs-proxy)
+  - [`deps` — serialise into the worker](#deps--serialise-into-the-worker)
+  - [`proxy` — stay on the main thread, call via IPC](#proxy--stay-on-the-main-thread-call-via-ipc)
+  - [Using both together](#using-both-together)
+- [AbortController](#abortcontroller)
+- [Retry and Dead Letter](#retry-and-dead-letter)
+- [Graceful Shutdown](#graceful-shutdown)
+- [AsyncLocalStorage Propagation](#asynclocalstorage-propagation)
+- [OpenTelemetry Trace Propagation](#opentelemetry-trace-propagation)
+- [Health Indicator](#health-indicator)
+- [Metrics](#metrics)
+- [Priority Queue](#priority-queue)
+- [Per-Worker Concurrency](#per-worker-concurrency)
+- [Constraints](#constraints)
+  - [Arguments and return values](#arguments-and-return-values)
+  - [Compiled output required](#compiled-output-required)
+  - [Circular deps](#circular-deps)
+
+---
+
 ## Features
 
 - **Worker pool** — pre-spawned threads, warmed up before the first request
@@ -42,13 +79,13 @@ Enterprise-grade worker thread module for NestJS. Offload CPU-bound work to a ma
 
 ## Requirements
 
-| Package | Version |
-|---|---|
-| Node.js | ≥ 18 (uses the global `structuredClone`, available since Node 17) |
-| `@nestjs/common` | `^10` or `^11` |
-| `@nestjs/core` | `^10` or `^11` |
-| `reflect-metadata` | `^0.1` or `^0.2` |
-| TypeScript `target` | `ES2022` or higher |
+| Package             | Version                                                           |
+| ------------------- | ----------------------------------------------------------------- |
+| Node.js             | ≥ 18 (uses the global `structuredClone`, available since Node 17) |
+| `@nestjs/common`    | `^10` or `^11`                                                    |
+| `@nestjs/core`      | `^10` or `^11`                                                    |
+| `reflect-metadata`  | `^0.1` or `^0.2`                                                  |
+| TypeScript `target` | `ES2022` or higher                                                |
 
 > **Important:** the project must be compiled to JS before running. nestworker locates compiled files via `require.cache`, which is only populated after compilation. Running via `ts-node` directly is not supported.
 
@@ -84,9 +121,7 @@ import { Module } from '@nestjs/common';
 import { WorkerModule } from 'nestworker';
 
 @Module({
-  imports: [
-    WorkerModule.forRoot({ poolSize: 4 }),
-  ],
+  imports: [WorkerModule.forRoot({ poolSize: 4 })],
 })
 export class AppModule {}
 ```
@@ -100,7 +135,7 @@ WorkerModule.forRootAsync({
     poolSize: cfg.get<number>('WORKER_POOL_SIZE'),
     shutdownTimeout: 30_000,
   }),
-})
+});
 ```
 
 ### 2. Decorate your service
@@ -150,19 +185,19 @@ export class ImageController {
 
 ### `WorkerModule.forRoot(options?)`
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `poolSize` | `number` | `os.cpus().length` | Worker thread count |
-| `concurrency` | `number` | `1` | Max in-flight jobs **per worker**. Set `> 1` to pipeline jobs so workers don't sit idle between results, or while a task is awaiting I/O (proxy IPC, `fetch`, `fs`, …). Keep at `1` for purely CPU-bound, fully blocking tasks. |
-| `shutdownTimeout` | `number` | `30_000` | Ms to wait for in-flight jobs on shutdown |
-| `asyncLocalStorages` | `AsyncLocalStorage[]` | `[]` | ALS instances to propagate into workers |
+| Option               | Type                  | Default            | Description                                                                                                                                                                                                                     |
+| -------------------- | --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `poolSize`           | `number`              | `os.cpus().length` | Worker thread count                                                                                                                                                                                                             |
+| `concurrency`        | `number`              | `1`                | Max in-flight jobs **per worker**. Set `> 1` to pipeline jobs so workers don't sit idle between results, or while a task is awaiting I/O (proxy IPC, `fetch`, `fs`, …). Keep at `1` for purely CPU-bound, fully blocking tasks. |
+| `shutdownTimeout`    | `number`              | `30_000`           | Ms to wait for in-flight jobs on shutdown                                                                                                                                                                                       |
+| `asyncLocalStorages` | `AsyncLocalStorage[]` | `[]`               | ALS instances to propagate into workers                                                                                                                                                                                         |
 
 ### `WorkerModule.forRootAsync(options)`
 
-| Field | Type | Description |
-|---|---|---|
-| `inject` | `any[]` | Tokens to inject into `useFactory` |
-| `useFactory` | `(...args) => WorkerModuleOptions` | Factory — may be async |
+| Field        | Type                               | Description                        |
+| ------------ | ---------------------------------- | ---------------------------------- |
+| `inject`     | `any[]`                            | Tokens to inject into `useFactory` |
+| `useFactory` | `(...args) => WorkerModuleOptions` | Factory — may be async             |
 
 ---
 
@@ -170,10 +205,10 @@ export class ImageController {
 
 Marks a NestJS provider as a container of worker tasks.
 
-| Option | Type | Description |
-|---|---|---|
-| `deps` | `Type[]` | Services to **serialise** into the worker. Must hold plain cloneable data — no DB connections, sockets, or streams. |
-| `proxy` | `Type[]` | Services that **stay on the main thread**. The worker calls them via IPC. Use for anything with I/O. |
+| Option  | Type     | Description                                                                                                         |
+| ------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| `deps`  | `Type[]` | Services to **serialise** into the worker. Must hold plain cloneable data — no DB connections, sockets, or streams. |
+| `proxy` | `Type[]` | Services that **stay on the main thread**. The worker calls them via IPC. Use for anything with I/O.                |
 
 ---
 
@@ -181,12 +216,12 @@ Marks a NestJS provider as a container of worker tasks.
 
 Marks a method to be offloaded to a worker thread.
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `priority` | `'HIGH' \| 'NORMAL' \| 'LOW'` | `'NORMAL'` | Queue priority |
-| `timeout` | `number` | — | Reject after this many ms |
-| `retry` | `number` | `0` | Extra attempts after first failure |
-| `retryDelay` | `number \| (attempt: number) => number` | `0` | Ms between retry attempts. See note below. |
+| Option       | Type                                    | Default    | Description                                |
+| ------------ | --------------------------------------- | ---------- | ------------------------------------------ |
+| `priority`   | `'HIGH' \| 'NORMAL' \| 'LOW'`           | `'NORMAL'` | Queue priority                             |
+| `timeout`    | `number`                                | —          | Reject after this many ms                  |
+| `retry`      | `number`                                | `0`        | Extra attempts after first failure         |
+| `retryDelay` | `number \| (attempt: number) => number` | `0`        | Ms between retry attempts. See note below. |
 
 > **`retryDelay` as a function:** functions can't cross the worker boundary, so when a function is supplied it's evaluated on the main thread at discovery time as the average of `fn(1)`, `fn(2)`, `fn(3)` and a warning is logged. For precise control (including exponential backoff) pass a number and recreate the curve with the per-call `RunOptions.retryDelay` override.
 
@@ -194,12 +229,12 @@ Marks a method to be offloaded to a worker thread.
 
 ### `WorkerService.run<T>(serviceName, methodName, args?, options?)`
 
-| Parameter | Type | Description |
-|---|---|---|
-| `serviceName` | `string` | Class name of the `@WorkerClass` provider |
-| `methodName` | `string` | Method decorated with `@WorkerTask` |
-| `args` | `unknown[]` | structuredClone-compatible arguments |
-| `options` | `RunOptions` | Per-call overrides (see below) |
+| Parameter     | Type         | Description                               |
+| ------------- | ------------ | ----------------------------------------- |
+| `serviceName` | `string`     | Class name of the `@WorkerClass` provider |
+| `methodName`  | `string`     | Method decorated with `@WorkerTask`       |
+| `args`        | `unknown[]`  | structuredClone-compatible arguments      |
+| `options`     | `RunOptions` | Per-call overrides (see below)            |
 
 ```ts
 interface RunOptions {
@@ -207,7 +242,7 @@ interface RunOptions {
   timeout?: number;
   retry?: number;
   retryDelay?: number;
-  signal?: AbortSignal;   // cancel the task
+  signal?: AbortSignal; // cancel the task
 }
 ```
 
@@ -234,10 +269,10 @@ const { poolSize, idle, busy, queued, warmingUp } = workerService.stats();
 
 ```ts
 interface PoolStats {
-  poolSize:  number;
-  idle:      number;
-  busy:      number;
-  queued:    number;
+  poolSize: number;
+  idle: number;
+  busy: number;
+  queued: number;
   warmingUp: number;
 }
 ```
@@ -323,8 +358,8 @@ this.userService.findById(userId)
 
 ```ts
 @WorkerClass({
-  deps:  [ConfigService],   // cloned into worker — fast local access
-  proxy: [UserService],     // stays on main thread — IPC on each call
+  deps: [ConfigService], // cloned into worker — fast local access
+  proxy: [UserService], // stays on main thread — IPC on each call
 })
 export class ReportService {
   constructor(
@@ -334,8 +369,8 @@ export class ReportService {
 
   @WorkerTask({ priority: 'LOW' })
   async buildReport(userId: string): Promise<Buffer> {
-    const limit  = this.configService.getNumber('REPORT_LIMIT'); // local, zero IPC
-    const user   = await this.userService.findById(userId);      // IPC round-trip
+    const limit = this.configService.getNumber('REPORT_LIMIT'); // local, zero IPC
+    const user = await this.userService.findById(userId); // IPC round-trip
     return heavyPdfGeneration(user, limit);
   }
 }
@@ -354,10 +389,9 @@ const controller = new AbortController();
 setTimeout(() => controller.abort(), 3000);
 
 try {
-  const result = await workerService.run(
-    'ImageService', 'resizeImage', [5],
-    { signal: controller.signal },
-  );
+  const result = await workerService.run('ImageService', 'resizeImage', [5], {
+    signal: controller.signal,
+  });
 } catch (err) {
   if (err.name === 'AbortError') {
     console.log('Task was cancelled');
@@ -405,7 +439,7 @@ workerService.onDead((event) => {
 On application shutdown, nestworker waits up to `shutdownTimeout` ms for in-flight jobs to complete before force-terminating workers. Queued jobs that haven't started are rejected immediately.
 
 ```ts
-WorkerModule.forRoot({ shutdownTimeout: 30_000 })
+WorkerModule.forRoot({ shutdownTimeout: 30_000 });
 ```
 
 ---
@@ -479,9 +513,7 @@ export class HealthController {
   @Get()
   @HealthCheck()
   check() {
-    return this.health.check([
-      () => this.workerHealth.check('workers'),
-    ]);
+    return this.health.check([() => this.workerHealth.check('workers')]);
   }
 }
 ```
@@ -526,8 +558,18 @@ export class MetricsController {
   "idleWorkers": 2,
   "busyWorkers": 6,
   "durations": {
-    "ImageService.resizeImage": { "p50": 42, "p95": 310, "p99": 890, "count": 1200 },
-    "ReportService.buildReport": { "p50": 180, "p95": 950, "p99": 2100, "count": 300 }
+    "ImageService.resizeImage": {
+      "p50": 42,
+      "p95": 310,
+      "p99": 890,
+      "count": 1200
+    },
+    "ReportService.buildReport": {
+      "p50": 180,
+      "p95": 950,
+      "p99": 2100,
+      "count": 300
+    }
   }
 }
 ```
@@ -540,10 +582,10 @@ Jobs queue when all threads are busy, sorted by priority — `HIGH` always runs 
 
 ```ts
 await Promise.all([
-  workerService.run('Svc', 'task', [], { priority: 'LOW'    }),
-  workerService.run('Svc', 'task', [], { priority: 'HIGH'   }),
+  workerService.run('Svc', 'task', [], { priority: 'LOW' }),
+  workerService.run('Svc', 'task', [], { priority: 'HIGH' }),
   workerService.run('Svc', 'task', [], { priority: 'NORMAL' }),
-  workerService.run('Svc', 'task', [], { priority: 'HIGH'   }),
+  workerService.run('Svc', 'task', [], { priority: 'HIGH' }),
 ]);
 // Execution order: HIGH → HIGH → NORMAL → LOW
 ```
@@ -559,9 +601,9 @@ sits idle while the main thread processes the previous result. Set
 
 ```ts
 WorkerModule.forRoot({
-  poolSize:    4,   // 4 worker threads
-  concurrency: 8,   // up to 8 in-flight jobs per worker → 32 concurrent jobs
-})
+  poolSize: 4, // 4 worker threads
+  concurrency: 8, // up to 8 in-flight jobs per worker → 32 concurrent jobs
+});
 ```
 
 Guidance:
@@ -586,11 +628,11 @@ there is nothing to configure.
 
 Must be [structuredClone](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) compatible.
 
-| ✅ Supported | ❌ Not supported |
-|---|---|
-| Primitives, plain objects, arrays | Class instances with methods |
-| `Map`, `Set`, `ArrayBuffer`, `Buffer` | Functions, closures |
-| `TypedArray`, `DataView` | `Promise`, `WeakMap`, `Socket` |
+| ✅ Supported                          | ❌ Not supported               |
+| ------------------------------------- | ------------------------------ |
+| Primitives, plain objects, arrays     | Class instances with methods   |
+| `Map`, `Set`, `ArrayBuffer`, `Buffer` | Functions, closures            |
+| `TypedArray`, `DataView`              | `Promise`, `WeakMap`, `Socket` |
 
 ### Compiled output required
 

@@ -6,8 +6,7 @@ import fs from 'fs/promises';
 @Injectable()
 @WorkerClass({ deps: [ConfigService] })
 export class ImageService {
-  constructor(private readonly configService: ConfigService) {
-  }
+  constructor(private readonly configService: ConfigService) {}
 
   @WorkerTask({ priority: 'HIGH' })
   resizeImage(value: number): number {
@@ -45,7 +44,7 @@ export class ImageService {
   }
 
   @WorkerTask()
-  async outlineModule(): Promise<{ p: number, f: number }> {
+  async outlineModule(): Promise<{ p: number; f: number }> {
     const p = await fs.readFile('./package.json', 'utf-8');
     const f = (await fetch('https://api.github.com')).status;
     return { p: p.length, f };

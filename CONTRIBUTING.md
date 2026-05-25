@@ -25,12 +25,12 @@ npm run build
 
 Common scripts (see `package.json`):
 
-| Script | Purpose |
-| --- | --- |
-| `npm run build` | Compile TypeScript via `tsconfig.build.json` to `dist/`. |
-| `npm run build:watch` | Same, in watch mode. |
-| `npm run example` | Build and run the example NestJS app (`dist/example/main.js`). |
-| `npm run bench` | Build and run the benchmark (`dist/example/bench.js`). |
+| Script                | Purpose                                                        |
+| --------------------- | -------------------------------------------------------------- |
+| `npm run build`       | Compile TypeScript via `tsconfig.build.json` to `dist/`.       |
+| `npm run build:watch` | Same, in watch mode.                                           |
+| `npm run example`     | Build and run the example NestJS app (`dist/example/main.js`). |
+| `npm run bench`       | Build and run the benchmark (`dist/example/bench.js`).         |
 
 > **Compiled output is mandatory.** The DI serializer locates each `@WorkerTask` provider by scanning `require.cache` for its constructor reference, which only works against the compiled `.js` files in `dist/`. Always run `npm run build` before `npm run example` / `npm run bench` or before manually verifying a change. `ts-node` is not supported.
 

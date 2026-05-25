@@ -1,6 +1,6 @@
 {
   "name": "nestworker",
-  "version": "2.1.5",
+  "version": "2.1.6",
   "description": "Enterprise-grade worker thread module for NestJS — priority pool, auto-discovery, DI in workers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +22,15 @@
     "build:watch": "tsc -p tsconfig.build.json --watch",
     "example": "npm run build && node dist/example/main.js",
     "bench": "npm run build && node dist/example/bench.js",
-    "prepublishOnly": "npm run build"
+    "test": "npm run build && jest",
+    "test:unit": "jest",
+    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "lint:fix": "eslint \"{src,test}/**/*.ts\" --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "prepublishOnly": "npm run format && npm run format:check && npm run check && npm run build"
   },
   "keywords": [
     "nestjs",
@@ -52,8 +60,18 @@
   "devDependencies": {
     "@nestjs/common": "^11.1.21",
     "@nestjs/core": "^11.1.21",
+    "@nestjs/testing": "^11.1.24",
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "jest": "^30.4.2",
+    "prettier": "^3.8.3",
     "reflect-metadata": "^0.2.2",
+    "ts-jest": "^29.4.11",
     "typescript": "^5.6.0"
   },
   "bugs": {

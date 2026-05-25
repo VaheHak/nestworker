@@ -37,7 +37,7 @@ export class WorkerDiscoveryService {
     if (this.discovered.length === 0) {
       this.logger.warn(
         'No @WorkerTask methods found. Ensure at least one class is decorated ' +
-        'with @WorkerClass() and has methods decorated with @WorkerTask().',
+          'with @WorkerClass() and has methods decorated with @WorkerTask().',
       );
     }
 
@@ -57,7 +57,7 @@ export class WorkerDiscoveryService {
       Reflect.getMetadata(WORKER_DEPS_META, metatype) ?? [];
 
     const deps = depTypes.map((token) =>
-      this.resolveToken(token, serviceName, 'deps')
+      this.resolveToken(token, serviceName, 'deps'),
     );
 
     // ── proxy services ────────────────────────────────────────────────────
@@ -66,15 +66,17 @@ export class WorkerDiscoveryService {
 
     const proxyInstances: ProxyInstance[] = proxyTypes.map((token) => {
       const svcInstance = this.resolveToken(token, serviceName, 'proxy') as
-        Record<string, (...args: unknown[]) => unknown> | undefined;
+        | Record<string, (...args: unknown[]) => unknown>
+        | undefined;
 
       const tokenName = (token as { name?: string }).name ?? 'unknown';
-      const propertyKey = findPropertyKey(instance, svcInstance) ?? camelCase(tokenName);
+      const propertyKey =
+        findPropertyKey(instance, svcInstance) ?? camelCase(tokenName);
 
       if (!findPropertyKey(instance, svcInstance)) {
         this.logger.warn(
           `${serviceName}: could not find property key for proxy "${tokenName}" ` +
-          `— falling back to camelCase: "${propertyKey}".`,
+            `— falling back to camelCase: "${propertyKey}".`,
         );
       }
 
@@ -102,7 +104,9 @@ export class WorkerDiscoveryService {
       if (methodName === 'constructor') continue;
 
       const options: WorkerTaskOptions | undefined = Reflect.getMetadata(
-        WORKER_METHOD_META, proto, methodName,
+        WORKER_METHOD_META,
+        proto,
+        methodName,
       );
       if (!options) continue;
 
@@ -118,16 +122,16 @@ export class WorkerDiscoveryService {
         retryDelay = Math.round((fn(1) + fn(2) + fn(3)) / 3);
         this.logger.warn(
           `${serviceName}.${methodName}: retryDelay as a function is not supported ` +
-          `across thread boundaries. Computed average: ${retryDelay}ms. ` +
-          `Pass a number for precise control.`,
+            `across thread boundaries. Computed average: ${retryDelay}ms. ` +
+            `Pass a number for precise control.`,
         );
       } else {
         retryDelay = options.retryDelay;
       }
 
-      const fn = (
-        instance as Record<string, (...args: unknown[]) => unknown>
-      )[methodName].bind(instance);
+      const fn = (instance as Record<string, (...args: unknown[]) => unknown>)[
+        methodName
+      ].bind(instance);
 
       this.discovered.push({
         serviceName,
@@ -145,14 +149,16 @@ export class WorkerDiscoveryService {
 
       this.logger.debug(
         `Registered task: ${serviceName}.${methodName} ` +
-        `[priority=${options.priority ?? 'NORMAL'}` +
-        `${options.timeout ? `, timeout=${options.timeout}ms` : ''}` +
-        `${options.retry ? `, retry=${options.retry}` : ''}]`,
+          `[priority=${options.priority ?? 'NORMAL'}` +
+          `${options.timeout ? `, timeout=${options.timeout}ms` : ''}` +
+          `${options.retry ? `, retry=${options.retry}` : ''}]`,
       );
     }
 
     if (tasksFound === 0) {
-      this.logger.warn(`${serviceName} has @WorkerClass() but no @WorkerTask() methods.`);
+      this.logger.warn(
+        `${serviceName} has @WorkerClass() but no @WorkerTask() methods.`,
+      );
     }
   }
 
@@ -167,7 +173,7 @@ export class WorkerDiscoveryService {
       const name = (token as { name?: string }).name ?? String(token);
       this.logger.error(
         `${ownerName}: failed to resolve ${role} token "${name}". ` +
-        `Original error: ${(err as Error).message}`,
+          `Original error: ${(err as Error).message}`,
       );
       return undefined;
     }
@@ -178,9 +184,11 @@ function findPropertyKey(
   serviceInstance: unknown,
   depInstance: unknown,
 ): string | undefined {
-  if (!serviceInstance || !depInstance || typeof serviceInstance !== 'object') return undefined;
+  if (!serviceInstance || !depInstance || typeof serviceInstance !== 'object')
+    return undefined;
   for (const key of Object.getOwnPropertyNames(serviceInstance)) {
-    if ((serviceInstance as Record<string, unknown>)[key] === depInstance) return key;
+    if ((serviceInstance as Record<string, unknown>)[key] === depInstance)
+      return key;
   }
   return undefined;
 }

@@ -48,9 +48,7 @@ export class WorkerHealthIndicator {
    */
   check(key: string): Record<string, WorkerHealthResult> {
     const stats = this.workerService.stats();
-    const isDown =
-      stats.warmingUp > 0 ||
-      stats.queued > stats.poolSize;
+    const isDown = stats.warmingUp > 0 || stats.queued > stats.poolSize;
 
     const result: WorkerHealthResult = {
       status: isDown ? 'down' : 'up',
@@ -59,7 +57,9 @@ export class WorkerHealthIndicator {
         ? { error: `${stats.warmingUp} worker(s) still warming up` }
         : {}),
       ...(isDown && stats.queued > stats.poolSize
-        ? { error: `Queue depth (${stats.queued}) exceeds pool size (${stats.poolSize})` }
+        ? {
+            error: `Queue depth (${stats.queued}) exceeds pool size (${stats.poolSize})`,
+          }
         : {}),
     };
 

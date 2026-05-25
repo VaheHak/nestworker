@@ -109,7 +109,7 @@ const NOOP_STUB: unknown = new Proxy(
       return typeof first === 'function' ? first : NOOP_STUB;
     },
     construct: () => Object.create(null),
-  }
+  },
 );
 
 // ── WorkerContainer ───────────────────────────────────────────────────────
@@ -129,7 +129,11 @@ export class WorkerContainer {
       // Reconstruct each dep from its compiled file + snapshot
       const depsByKey = new Map<string, unknown>();
       for (const dep of svc.deps) {
-        const inst = this.reconstructFromFile(dep.filePath, dep.name, dep.snapshot);
+        const inst = this.reconstructFromFile(
+          dep.filePath,
+          dep.name,
+          dep.snapshot,
+        );
         this.instances.set(dep.name, inst);
         depsByKey.set(dep.propertyKey, inst);
       }
@@ -161,7 +165,10 @@ export class WorkerContainer {
     snapshot: Record<string, unknown>,
   ): unknown {
     const DepClass = this.loadClass(filePath, className);
-    const instance = Object.create(DepClass.prototype as object) as Record<string, unknown>;
+    const instance = Object.create(DepClass.prototype as object) as Record<
+      string,
+      unknown
+    >;
     Object.assign(instance, snapshot);
     return instance;
   }
@@ -182,7 +189,7 @@ export class WorkerContainer {
     if (typeof cls !== 'function') {
       throw new Error(
         `WorkerContainer: "${className}" not found in "${filePath}". ` +
-        `Available exports: ${Object.keys(exports).join(', ')}`,
+          `Available exports: ${Object.keys(exports).join(', ')}`,
       );
     }
     return cls as new (...args: unknown[]) => unknown;
@@ -240,7 +247,9 @@ export class WorkerContainer {
     return mod.exports;
   }
 
-  private createSandboxRequire(parentFilePath: string): (id: string) => unknown {
+  private createSandboxRequire(
+    parentFilePath: string,
+  ): (id: string) => unknown {
     const parentRequire = nodeModule.createRequire(parentFilePath);
 
     return (id: string): unknown => {
@@ -258,10 +267,7 @@ export class WorkerContainer {
     };
   }
 
-  private tryResolve(
-    req: NodeJS.Require,
-    id: string,
-  ): string | undefined {
+  private tryResolve(req: NodeJS.Require, id: string): string | undefined {
     try {
       return req.resolve(id);
     } catch {
@@ -280,12 +286,17 @@ function createReflectShim(): typeof Reflect {
     metadata?: (...args: unknown[]) => unknown;
   };
 
-  if (typeof shim.getMetadata !== 'function') shim.getMetadata = () => undefined;
-  if (typeof shim.defineMetadata !== 'function') shim.defineMetadata = () => undefined;
-  if (typeof shim.getOwnMetadata !== 'function') shim.getOwnMetadata = () => undefined;
+  if (typeof shim.getMetadata !== 'function')
+    shim.getMetadata = () => undefined;
+  if (typeof shim.defineMetadata !== 'function')
+    shim.defineMetadata = () => undefined;
+  if (typeof shim.getOwnMetadata !== 'function')
+    shim.getOwnMetadata = () => undefined;
   if (typeof shim.hasMetadata !== 'function') shim.hasMetadata = () => false;
-  if (typeof shim.hasOwnMetadata !== 'function') shim.hasOwnMetadata = () => false;
-  if (typeof shim.metadata !== 'function') shim.metadata = () => () => undefined;
+  if (typeof shim.hasOwnMetadata !== 'function')
+    shim.hasOwnMetadata = () => false;
+  if (typeof shim.metadata !== 'function')
+    shim.metadata = () => () => undefined;
 
   return shim as typeof Reflect;
 }

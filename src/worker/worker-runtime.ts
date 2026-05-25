@@ -75,7 +75,9 @@ port.on('message', (msg: unknown) => {
     const pending = pendingIpc.get(res.callId);
     if (!pending) return;
     pendingIpc.delete(res.callId);
-    res.ok ? pending.resolve(res.data) : pending.reject(new Error(res.error ?? 'IPC failed'));
+    res.ok
+      ? pending.resolve(res.data)
+      : pending.reject(new Error(res.error ?? 'IPC failed'));
     return;
   }
 
@@ -131,10 +133,12 @@ function buildProxy(descriptor: ProxyServiceDescriptor): ServiceInstance {
           port.postMessage(request);
         } catch (err: unknown) {
           pendingIpc.delete(callId);
-          reject(new Error(
-            `IPC proxy "${propertyKey}.${methodName}" could not serialise args: ` +
-            `${(err as Error).message}`,
-          ));
+          reject(
+            new Error(
+              `IPC proxy "${propertyKey}.${methodName}" could not serialise args: ` +
+                `${(err as Error).message}`,
+            ),
+          );
         }
       });
   }
@@ -182,7 +186,10 @@ function flushResults(): void {
   }
   // Move out of the shared buffer before postMessage in case the clone
   // triggers further microtasks that try to flush again.
-  const batch: WorkerResultBatch = { type: 'results', results: resultBuffer.slice(0, n) };
+  const batch: WorkerResultBatch = {
+    type: 'results',
+    results: resultBuffer.slice(0, n),
+  };
   resultBuffer.length = 0;
   port.postMessage(batch);
 }
@@ -205,7 +212,10 @@ function runJob(job: WorkerJob): void {
   const jobId = job.jobId;
   const inst = getInstance(job.serviceName);
   if (!inst) {
-    postError(jobId, new Error(`Service "${job.serviceName}" is not registered`));
+    postError(
+      jobId,
+      new Error(`Service "${job.serviceName}" is not registered`),
+    );
     return;
   }
 
@@ -217,7 +227,9 @@ function runJob(job: WorkerJob): void {
       const d = proxyServices[i];
       const key = job.serviceName + ':' + d.propertyKey;
       if (!proxiesInstalled.has(key)) {
-        inst[d.propertyKey] = buildProxy(d) as unknown as (...args: unknown[]) => unknown;
+        inst[d.propertyKey] = buildProxy(d) as unknown as (
+          ...args: unknown[]
+        ) => unknown;
         proxiesInstalled.add(key);
       }
     }
@@ -225,7 +237,12 @@ function runJob(job: WorkerJob): void {
 
   const fn = inst[job.methodName];
   if (typeof fn !== 'function') {
-    postError(jobId, new Error(`Task "${job.serviceName}.${job.methodName}" is not registered`));
+    postError(
+      jobId,
+      new Error(
+        `Task "${job.serviceName}.${job.methodName}" is not registered`,
+      ),
+    );
     return;
   }
 
@@ -305,11 +322,11 @@ function serializeExtraProps(
       structuredClone(err[key]);
       extra[key] = err[key];
       hasExtra = true;
-    } catch { /* skip non-cloneable */
+    } catch {
+      /* skip non-cloneable */
     }
   }
   return hasExtra ? extra : undefined;
 }
 
 const SKIP_ERR_KEYS = new Set(['name', 'message', 'stack', 'code']);
-

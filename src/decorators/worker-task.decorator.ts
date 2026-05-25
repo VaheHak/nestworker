@@ -1,9 +1,9 @@
 import 'reflect-metadata';
 
-export const WORKER_CLASS_META  = 'worker:class';
+export const WORKER_CLASS_META = 'worker:class';
 export const WORKER_METHOD_META = 'worker:method';
-export const WORKER_DEPS_META   = 'worker:deps';
-export const WORKER_PROXY_META  = 'worker:proxy';
+export const WORKER_DEPS_META = 'worker:deps';
+export const WORKER_PROXY_META = 'worker:proxy';
 
 export interface WorkerTaskOptions {
   priority?: 'HIGH' | 'NORMAL' | 'LOW';
@@ -17,9 +17,9 @@ export interface WorkerTaskOptions {
 
 export function WorkerClass(
   options: {
-    deps?:  (abstract new (...a: unknown[]) => unknown)[];
+    deps?: (abstract new (...a: unknown[]) => unknown)[];
     proxy?: (abstract new (...a: unknown[]) => unknown)[];
-  } = {}
+  } = {},
 ): ClassDecorator {
   return (target) => {
     Reflect.defineMetadata(WORKER_CLASS_META, true, target);
