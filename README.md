@@ -179,18 +179,49 @@ export class ImageController {
 }
 ```
 
+### Typed invocation
+
+`run(serviceName, methodName, args)` is convenient but stringly-typed. For
+compile-time safety on both the method name and its argument shape, use
+`invoke(Class)` — calling any method on the returned handle delegates to
+`run` and infers the right return type:
+
+```ts
+import { ImageService } from './image.service';
+
+const out = await this.workerService.invoke(ImageService).resizeImage(5);
+//    ^? number
+
+// Per-invocation options (priority, timeout, signal, …):
+await this.workerService
+  .invoke(ImageService, { timeout: 5_000 })
+  .generateThumbnail(320, 240);
+```
+
 ---
 
 ## API
 
 ### `WorkerModule.forRoot(options?)`
 
-| Option               | Type                  | Default            | Description                                                                                                                                                                                                                     |
-| -------------------- | --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `poolSize`           | `number`              | `os.cpus().length` | Worker thread count                                                                                                                                                                                                             |
-| `concurrency`        | `number`              | `1`                | Max in-flight jobs **per worker**. Set `> 1` to pipeline jobs so workers don't sit idle between results, or while a task is awaiting I/O (proxy IPC, `fetch`, `fs`, …). Keep at `1` for purely CPU-bound, fully blocking tasks. |
-| `shutdownTimeout`    | `number`              | `30_000`           | Ms to wait for in-flight jobs on shutdown                                                                                                                                                                                       |
-| `asyncLocalStorages` | `AsyncLocalStorage[]` | `[]`               | ALS instances to propagate into workers                                                                                                                                                                                         |
+| Option               | Type                      | Default            | Description                                                                                                                                                                                                                     |
+| -------------------- | ------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `poolSize`           | `number`                  | `os.cpus().length` | Worker thread count                                                                                                                                                                                                             |
+| `concurrency`        | `number`                  | `1`                | Max in-flight jobs **per worker**. Set `> 1` to pipeline jobs so workers don't sit idle between results, or while a task is awaiting I/O (proxy IPC, `fetch`, `fs`, …). Keep at `1` for purely CPU-bound, fully blocking tasks. |
+| `shutdownTimeout`    | `number`                  | `30_000`           | Ms to wait for in-flight jobs on shutdown                                                                                                                                                                                       |
+| `maxQueueDepth`      | `number`                  | `Infinity`         | Reject new tasks with `QueueFullError` once the pending queue exceeds this size (backpressure)                                                                                                                                  |
+| `logger`             | `{ error, warn, debug? }` | NestJS `Logger`    | Plug pino / winston / etc. — anything with `error(msg, trace?)` / `warn(msg)` works                                                                                                                                             |
+| `asyncLocalStorages` | `AsyncLocalStorage[]`     | `[]`               | ALS instances to propagate into workers                                                                                                                                                                                         |
+
+> **`concurrency` ⚠ shared-state footgun.** Pipelined jobs share the same
+> service instance inside a worker. If a `@WorkerTask` mutates instance
+> state (counters, caches keyed without a request id, …), interleaved jobs
+> will trample each other. Keep workers stateless or scope mutable state by
+> jobId. Stateless transforms are safe.
+
+> **`maxQueueDepth` + `stats().saturation`.** Read `ws.stats().saturation`
+> (0–1) periodically to drive autoscaling or shed load before
+> `QueueFullError` starts firing.
 
 ### `WorkerModule.forRootAsync(options)`
 

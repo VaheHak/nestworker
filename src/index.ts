@@ -3,7 +3,8 @@ export { WorkerModule } from './core/worker.module';
 
 // Services
 export { WorkerService } from './core/worker.service';
-export type { RunOptions } from './core/worker.service';
+export type { RunOptions, WorkerInvocation } from './core/worker.service';
+export { QueueFullError } from './core/worker.pool';
 
 // Decorators
 export { WorkerClass, WorkerTask } from './decorators/worker-task.decorator';
@@ -22,6 +23,7 @@ export type {
   WorkerJob,
   WorkerModuleOptions,
   WorkerModuleAsyncOptions,
+  WorkerLogger,
   TaskPriority,
   DeadLetterEvent,
   PoolStats,

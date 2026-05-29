@@ -44,27 +44,18 @@ async function bootstrap() {
   // ── Task 1: sequential ────────────────────────────────────────────────────
   console.log('▶ resizeImage [priority: HIGH]');
   console.time('resizeImage');
-  const resized = await workerService.run<number>(
-    'ImageService',
-    'resizeImage',
-    [5],
-  );
+  const resized = await workerService.run<number>('ImageService', 'resizeImage', [5]);
   console.timeEnd('resizeImage');
   console.log('  result:', resized);
 
   // ── Task 2: sequential ────────────────────────────────────────────────────
   console.log('\n▶ generateThumbnail [priority: LOW override]');
   console.time('generateThumbnail');
-  const thumb = await workerService.run<string>(
-    'ImageService',
-    'generateThumbnail',
-    [1920, 1080],
-    {
-      priority: 'LOW',
-      retry: 3,
-      retryDelay: 1000,
-    },
-  );
+  const thumb = await workerService.run<string>('ImageService', 'generateThumbnail', [1920, 1080], {
+    priority: 'LOW',
+    retry: 3,
+    retryDelay: 1000,
+  });
   console.timeEnd('generateThumbnail');
   console.log('  result:', thumb);
 

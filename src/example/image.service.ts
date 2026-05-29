@@ -49,4 +49,27 @@ export class ImageService {
     const f = (await fetch('https://api.github.com')).status;
     return { p: p.length, f };
   }
+
+  /**
+   * Sleep `ms` then return — used by tests for timeout/abort scenarios.
+   * Accepts an optional AbortSignal as the last arg (auto-injected by the
+   * pool when the caller passes `{ signal }`).
+   */
+  @WorkerTask()
+  async sleep(ms: number, signal?: AbortSignal): Promise<string> {
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(resolve, ms);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(t);
+        reject(new Error('aborted'));
+      });
+    });
+    return `slept ${ms}ms`;
+  }
+
+  /** Always throws — used to exercise retry / dead-letter paths. */
+  @WorkerTask({ retry: 0 })
+  alwaysFail(): never {
+    throw new Error('boom');
+  }
 }

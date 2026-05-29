@@ -21,13 +21,6 @@ const container = new WorkerContainer();
 type ServiceInstance = Record<string, (...args: unknown[]) => unknown>;
 
 const instances = new Map<string, ServiceInstance>();
-// Index services by name so we can lazily reconstruct each one the first
-// time a job for it arrives. Loading ALL services synchronously before
-// sending `worker:ready` delays the pool from dispatching ANY work to this
-// worker — which is catastrophic for cold-burst throughput when many
-// workers spawn together. Lazy loading lets the pool start dispatching
-// immediately; each service pays its `vm.runInContext` cost on its first
-// invocation and is cached for every subsequent call.
 const servicesByName = new Map<string, SerializedService>();
 for (const svc of services) servicesByName.set(svc.name, svc);
 
@@ -42,54 +35,55 @@ function getInstance(name: string): ServiceInstance | undefined {
   return inst;
 }
 
-// Stash parentPort once — `parentPort` is a module getter; caching the
-// reference avoids the getter call on every postMessage on the hot path.
 const port = parentPort!;
 port.postMessage({ type: 'worker:ready' });
 
 // ── Pending IPC calls ─────────────────────────────────────────────────────
-const pendingIpc = new Map<
-  number,
-  { resolve: (v: unknown) => void; reject: (e: Error) => void }
->();
+const pendingIpc = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
 // ── Pending AbortControllers (keyed by abortSignalId) ────────────────────
 const pendingAborts = new Map<number, AbortController>();
 
-// ── Internal ALS for context propagation ─────────────────────────────────
-const workerAls = new AsyncLocalStorage<Record<string, unknown>>();
+/**
+ * abortSignalId of the task currently being dispatched on this microtask.
+ * `buildProxy` reads it so that proxy IPC requests can forward the parent
+ * task's abort id to the main thread, allowing proxy methods to receive
+ * the originating AbortSignal as their last argument.
+ *
+ * Set in `runJob` immediately before invoking the task, cleared in the
+ * settle paths. Proxy calls scheduled synchronously inside the task body
+ * (or in micro/macrotasks chained off it) inherit this id automatically.
+ */
+let currentAbortId: number | undefined;
 
-// Cache built proxies per descriptor signature — proxy descriptors are
-// static per service, but the previous code rebuilt them on every job and
-// mutated the shared service instance each time. Cache by propertyKey.
+// ── ALS for context propagation ──────────────────────────────────────────
+// The shape mirrors the WorkerModuleOptions.asyncLocalStorages array order.
+// Stored as `unknown[]` (not `Record<string, unknown>`) so >10 storages
+// work and the structuredClone payload is smaller.
+const workerAls = new AsyncLocalStorage<unknown[]>();
+
 const proxyCache = new Map<string, ServiceInstance>();
-const proxiesInstalled = new Set<string>(); // `${serviceName}:${propertyKey}`
+const proxiesInstalled = new WeakMap<ServiceInstance, Set<string>>();
 
 port.on('message', (msg: unknown) => {
   const message = msg as WorkerInboundMessage;
   const t = (message as { type?: string }).type;
 
-  // IPC result from main thread
   if (t === 'ipc:result') {
     const res = message as IpcInvokeResponse;
     const pending = pendingIpc.get(res.callId);
     if (!pending) return;
     pendingIpc.delete(res.callId);
-    res.ok
-      ? pending.resolve(res.data)
-      : pending.reject(new Error(res.error ?? 'IPC failed'));
+    res.ok ? pending.resolve(res.data) : pending.reject(new Error(res.error ?? 'IPC failed'));
     return;
   }
 
-  // Abort signal from main thread
   if (t === 'abort') {
     const abort = message as WorkerAbortMessage;
     pendingAborts.get(abort.abortSignalId)?.abort();
     return;
   }
 
-  // Batched jobs — process each. All sync-resolving results get auto-batched
-  // back into a single results envelope via the result flush microtask.
   if (t === 'batch') {
     const batch = message as WorkerJobBatch;
     const jobs = batch.jobs;
@@ -99,16 +93,13 @@ port.on('message', (msg: unknown) => {
     } finally {
       forceBuffer = false;
     }
-    // Flush any sync results we accumulated during the loop as one envelope.
     if (resultBuffer.length > 0) {
-      flushScheduled = true; // suppress the queued microtask flush
+      flushScheduled = true;
       flushResults();
     }
     return;
   }
 
-  // Single job — pool sends this when only one job was dispatched in the
-  // schedule pass (no batching benefit to wrap a 1-element envelope).
   runJob(message as WorkerJob);
 });
 
@@ -129,6 +120,9 @@ function buildProxy(descriptor: ProxyServiceDescriptor): ServiceInstance {
           methodName,
           args,
         };
+        // Propagate the originating task's abortSignalId so the main thread
+        // can supply a live AbortSignal to the proxy method implementation.
+        if (currentAbortId !== undefined) request.abortSignalId = currentAbortId;
         try {
           port.postMessage(request);
         } catch (err: unknown) {
@@ -146,26 +140,11 @@ function buildProxy(descriptor: ProxyServiceDescriptor): ServiceInstance {
   return proxy;
 }
 
-// Counter-based call IDs — far cheaper than crypto.randomUUID() and only
-// need to be unique within this worker process. Numeric IDs clone faster
-// and hash cheaper than strings.
 let __callCounter = 0;
 
 // ── Outgoing result batching ─────────────────────────────────────────────
-//
-// We accumulate results into a single envelope per microtask tick. When a
-// batch of jobs is dispatched at once, their resolved Promises all fire on
-// the same microtask drain; the flush microtask is scheduled at the first
-// postResult call and runs AFTER every queued .then, so it captures the
-// entire batch and sends it in ONE postMessage. This collapses the per-job
-// structuredClone fixed cost into a single per-batch one.
-
 const resultBuffer: WorkerResult[] = [];
 let flushScheduled = false;
-// When true, postResult always buffers (we're inside a batch loop and want
-// every sync-resolved result of that batch to coalesce into one postMessage).
-// When false (the steady-state concurrency=1 round-trip path), the FIRST
-// result of the tick is posted immediately and only subsequent ones buffer.
 let forceBuffer = false;
 
 function scheduleFlush(): void {
@@ -184,8 +163,6 @@ function flushResults(): void {
     port.postMessage(only);
     return;
   }
-  // Move out of the shared buffer before postMessage in case the clone
-  // triggers further microtasks that try to flush again.
   const batch: WorkerResultBatch = {
     type: 'results',
     results: resultBuffer.slice(0, n),
@@ -195,11 +172,6 @@ function flushResults(): void {
 }
 
 function postResult(res: WorkerResult): void {
-  // Fast path: outside any batch loop, no flush pending, buffer empty.
-  // This is the steady-state case for single-job dispatches (concurrency=1):
-  // sending immediately removes a full microtask hop from the round-trip.
-  // Any later results arriving in the SAME tick will queue and flush as
-  // a batch as usual.
   if (!forceBuffer && !flushScheduled && resultBuffer.length === 0) {
     port.postMessage(res);
     return;
@@ -212,57 +184,55 @@ function runJob(job: WorkerJob): void {
   const jobId = job.jobId;
   const inst = getInstance(job.serviceName);
   if (!inst) {
-    postError(
-      jobId,
-      new Error(`Service "${job.serviceName}" is not registered`),
-    );
+    postError(jobId, new Error(`Service "${job.serviceName}" is not registered`));
     return;
   }
 
-  // Inject proxy stubs the first time we see a (service, propertyKey) pair.
-  // Proxies are static per service — re-mutating per job was wasted work.
   const proxyServices = job.proxyServices;
   if (proxyServices !== undefined && proxyServices.length > 0) {
+    let installed = proxiesInstalled.get(inst);
+    if (!installed) {
+      installed = new Set();
+      proxiesInstalled.set(inst, installed);
+    }
     for (let i = 0; i < proxyServices.length; i++) {
       const d = proxyServices[i];
-      const key = job.serviceName + ':' + d.propertyKey;
-      if (!proxiesInstalled.has(key)) {
-        inst[d.propertyKey] = buildProxy(d) as unknown as (
-          ...args: unknown[]
-        ) => unknown;
-        proxiesInstalled.add(key);
+      if (!installed.has(d.propertyKey)) {
+        inst[d.propertyKey] = buildProxy(d) as unknown as (...args: unknown[]) => unknown;
+        installed.add(d.propertyKey);
       }
     }
   }
 
   const fn = inst[job.methodName];
   if (typeof fn !== 'function') {
-    postError(
-      jobId,
-      new Error(
-        `Task "${job.serviceName}.${job.methodName}" is not registered`,
-      ),
-    );
+    postError(jobId, new Error(`Task "${job.serviceName}.${job.methodName}" is not registered`));
     return;
   }
 
   const abortSignalId = job.abortSignalId;
   const args = job.args;
-  let abortController: AbortController | undefined;
   let callArgs: unknown[] = args;
   if (abortSignalId !== undefined) {
-    abortController = new AbortController();
+    const abortController = new AbortController();
     pendingAborts.set(abortSignalId, abortController);
     callArgs = [...args, abortController.signal];
   }
 
+  const settle = (): void => {
+    if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
+    if (currentAbortId === abortSignalId) currentAbortId = undefined;
+  };
+
+  // Track the active task's abort id so synchronously-launched proxy calls
+  // can forward it. Restored after the synchronous portion of the task runs.
+  const prevAbortId = currentAbortId;
+  currentAbortId = abortSignalId;
+
   try {
     const alsContext = job.alsContext;
-    // Common path: no ALS — call fn directly with `inst` as `this`.
     let result: unknown;
     if (alsContext === undefined) {
-      // .apply is faster than spread when callArgs is the original array,
-      // and avoids an allocation on the no-abort path.
       result = (fn as (...a: unknown[]) => unknown).apply(inst, callArgs);
     } else {
       result = workerAls.run(alsContext, () =>
@@ -270,30 +240,36 @@ function runJob(job: WorkerJob): void {
       );
     }
 
-    // Sync fast path: avoid Promise allocation + microtask roundtrip when
-    // the task returned a plain value.
     if (
       result === null ||
       typeof result !== 'object' ||
       typeof (result as { then?: unknown }).then !== 'function'
     ) {
-      if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
+      settle();
       postResult({ type: 'result', ok: true, data: result, jobId });
       return;
     }
+    // Async return — keep currentAbortId set across the .then so proxy calls
+    // scheduled in microtasks chained off the task body still see it.
+    // (`currentAbortId` is only used synchronously by proxy methods at the
+    // moment they are CALLED, not when they postMessage.)
     (result as Promise<unknown>).then(
       (data) => {
-        if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
+        settle();
         postResult({ type: 'result', ok: true, data, jobId });
       },
       (error: unknown) => {
-        if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
+        settle();
         postError(jobId, error);
       },
     );
   } catch (error: unknown) {
-    if (abortSignalId !== undefined) pendingAborts.delete(abortSignalId);
+    settle();
     postError(jobId, error);
+  } finally {
+    // Restore the outer abort id so back-to-back synchronous runJob calls
+    // (from a batch) don't leak ids into each other's proxy invocations.
+    currentAbortId = prevAbortId;
   }
 }
 
@@ -318,15 +294,27 @@ function serializeExtraProps(
   let hasExtra = false;
   for (const key of Object.keys(err)) {
     if (skip.has(key)) continue;
-    try {
-      structuredClone(err[key]);
-      extra[key] = err[key];
-      hasExtra = true;
-    } catch {
-      /* skip non-cloneable */
-    }
+    extra[key] = err[key];
+    hasExtra = true;
   }
-  return hasExtra ? extra : undefined;
+  if (!hasExtra) return undefined;
+  try {
+    structuredClone(extra);
+    return extra;
+  } catch {
+    const safe: Record<string, unknown> = {};
+    let kept = false;
+    for (const key of Object.keys(extra)) {
+      try {
+        structuredClone(extra[key]);
+        safe[key] = extra[key];
+        kept = true;
+      } catch {
+        /* skip */
+      }
+    }
+    return kept ? safe : undefined;
+  }
 }
 
 const SKIP_ERR_KEYS = new Set(['name', 'message', 'stack', 'code']);

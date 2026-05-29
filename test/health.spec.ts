@@ -34,9 +34,7 @@ describe('WorkerHealthIndicator', () => {
       fail('expected check() to throw');
     } catch (err) {
       const causes = (err as { causes?: string[] }).causes ?? [];
-      const indicator = (
-        err as Record<string, { status: string; error?: string }>
-      ).workers;
+      const indicator = (err as Record<string, { status: string; error?: string }>).workers;
       expect(indicator.status).toBe('down');
       expect(causes[0]).toMatch(/warming up/);
     }
@@ -54,9 +52,7 @@ describe('WorkerHealthIndicator', () => {
       ind.check('workers');
       fail('expected check() to throw');
     } catch (err) {
-      const indicator = (
-        err as Record<string, { status: string; error?: string }>
-      ).workers;
+      const indicator = (err as Record<string, { status: string; error?: string }>).workers;
       expect(indicator.status).toBe('down');
       expect(indicator.error).toMatch(/Queue depth/);
     }

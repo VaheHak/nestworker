@@ -48,11 +48,7 @@ describe('@WorkerClass / @WorkerTask decorators', () => {
   });
 
   it('records full options on each @WorkerTask method', () => {
-    const high = Reflect.getMetadata(
-      WORKER_METHOD_META,
-      Sample.prototype,
-      'high',
-    );
+    const high = Reflect.getMetadata(WORKER_METHOD_META, Sample.prototype, 'high');
     expect(high).toEqual({
       priority: 'HIGH',
       timeout: 1234,
@@ -60,17 +56,11 @@ describe('@WorkerClass / @WorkerTask decorators', () => {
       retryDelay: 100,
     });
 
-    const defaults = Reflect.getMetadata(
-      WORKER_METHOD_META,
-      Sample.prototype,
-      'defaults',
-    );
+    const defaults = Reflect.getMetadata(WORKER_METHOD_META, Sample.prototype, 'defaults');
     expect(defaults).toEqual({});
   });
 
   it('does not tag undecorated methods', () => {
-    expect(
-      Reflect.getMetadata(WORKER_METHOD_META, Sample.prototype, 'notATask'),
-    ).toBeUndefined();
+    expect(Reflect.getMetadata(WORKER_METHOD_META, Sample.prototype, 'notATask')).toBeUndefined();
   });
 });

@@ -15,8 +15,13 @@ export interface WorkerJob {
   methodName: string;
   args: unknown[];
   proxyServices?: ProxyServiceDescriptor[];
-  /** ALS context snapshot — restored in worker before task runs */
-  alsContext?: Record<string, unknown>;
+  /**
+   * ALS context snapshot. Index `i` corresponds to the i-th storage in
+   * `WorkerModuleOptions.asyncLocalStorages`. Encoded as an array — smaller
+   * structuredClone payload than an object, and survives >10 storages
+   * (the old string-keyed encoding broke past 9).
+   */
+  alsContext?: unknown[];
   /** OTEL trace context — W3C traceparent/tracestate headers */
   traceContext?: Record<string, string>;
   /** AbortSignal is non-transferable; we send the signal ID instead */
@@ -65,6 +70,13 @@ export interface IpcInvokeRequest {
   propertyKey: string;
   methodName: string;
   args: unknown[];
+  /**
+   * If the originating worker task was invoked with an AbortSignal, the
+   * worker forwards its abortSignalId here so the main thread can wire the
+   * proxy call to the same signal — preventing proxy methods from running
+   * past their parent task's cancellation.
+   */
+  abortSignalId?: number;
 }
 
 export interface IpcInvokeResponse {
@@ -133,7 +145,8 @@ export interface DiscoveredTask {
   priority: TaskPriority;
   timeout?: number;
   retry?: number;
-  retryDelay?: number;
+  /** Number or function — functions are evaluated main-thread per attempt. */
+  retryDelay?: number | ((attempt: number) => number);
   fn: (...args: unknown[]) => unknown;
   metatype: new (...args: unknown[]) => unknown;
   instance: unknown;
@@ -170,17 +183,35 @@ export interface WorkerModuleOptions {
    */
   shutdownTimeout?: number;
   /**
+   * Maximum number of pending tasks allowed in the queue. When the queue is
+   * full, `WorkerService.run()` rejects with a `QueueFullError` instead of
+   * enqueuing — gives callers a chance to apply backpressure. Defaults to
+   * `Infinity` (unbounded, legacy behaviour).
+   */
+  maxQueueDepth?: number;
+  /**
    * AsyncLocalStorage instances whose current store should be propagated
    * into worker tasks. Pass the same ALS instances you use in your app.
    */
   asyncLocalStorages?: AsyncLocalStorage<unknown>[];
+
+  /**
+   * Optional logger sink. Defaults to `@nestjs/common`'s `Logger`. Pass any
+   * object with `error`/`warn`/`debug` methods to integrate pino, winston,
+   * bunyan, etc.
+   */
+  logger?: WorkerLogger;
+}
+
+export interface WorkerLogger {
+  error(message: string, trace?: string): void;
+  warn(message: string): void;
+  debug?(message: string): void;
 }
 
 export interface WorkerModuleAsyncOptions {
   inject?: unknown[];
-  useFactory: (
-    ...args: unknown[]
-  ) => WorkerModuleOptions | Promise<WorkerModuleOptions>;
+  useFactory: (...args: unknown[]) => WorkerModuleOptions | Promise<WorkerModuleOptions>;
 }
 
 // ── Pool stats (for health + metrics) ─────────────────────────────────────
@@ -191,4 +222,8 @@ export interface PoolStats {
   busy: number;
   queued: number;
   warmingUp: number;
+  /** Queue depth as a fraction of `maxQueueDepth` (0..1). 0 when unbounded. */
+  saturation: number;
+  /** Configured `maxQueueDepth` (Infinity when unbounded). */
+  maxQueueDepth: number;
 }

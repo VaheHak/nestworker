@@ -56,9 +56,7 @@ export class WorkerDiscoveryService {
     const depTypes: (abstract new (...a: unknown[]) => unknown)[] =
       Reflect.getMetadata(WORKER_DEPS_META, metatype) ?? [];
 
-    const deps = depTypes.map((token) =>
-      this.resolveToken(token, serviceName, 'deps'),
-    );
+    const deps = depTypes.map((token) => this.resolveToken(token, serviceName, 'deps'));
 
     // ── proxy services ────────────────────────────────────────────────────
     const proxyTypes: (abstract new (...a: unknown[]) => unknown)[] =
@@ -70,8 +68,7 @@ export class WorkerDiscoveryService {
         | undefined;
 
       const tokenName = (token as { name?: string }).name ?? 'unknown';
-      const propertyKey =
-        findPropertyKey(instance, svcInstance) ?? camelCase(tokenName);
+      const propertyKey = findPropertyKey(instance, svcInstance) ?? camelCase(tokenName);
 
       if (!findPropertyKey(instance, svcInstance)) {
         this.logger.warn(
@@ -112,26 +109,16 @@ export class WorkerDiscoveryService {
 
       tasksFound++;
 
-      // Normalise retryDelay: function form → serialised as max of first 3 calls
-      // (functions can't cross the thread boundary; we store the numeric value)
-      let retryDelay: number | undefined;
-      if (typeof options.retryDelay === 'function') {
-        // Store delays for attempts 1-3 as a simple average to give workers
-        // a representative delay. For production use, pass a number.
-        const fn = options.retryDelay;
-        retryDelay = Math.round((fn(1) + fn(2) + fn(3)) / 3);
-        this.logger.warn(
-          `${serviceName}.${methodName}: retryDelay as a function is not supported ` +
-            `across thread boundaries. Computed average: ${retryDelay}ms. ` +
-            `Pass a number for precise control.`,
-        );
-      } else {
-        retryDelay = options.retryDelay;
-      }
+      // retryDelay stays as-is — both numeric and function forms are
+      // resolved on the main thread (in WorkerPool.handleFailure), so the
+      // function never has to cross the worker boundary. Earlier versions
+      // pre-averaged the function which silently dropped attempt-dependent
+      // backoff (e.g. `(n) => n * 1000`).
+      const retryDelay = options.retryDelay;
 
-      const fn = (instance as Record<string, (...args: unknown[]) => unknown>)[
-        methodName
-      ].bind(instance);
+      const fn = (instance as Record<string, (...args: unknown[]) => unknown>)[methodName].bind(
+        instance,
+      );
 
       this.discovered.push({
         serviceName,
@@ -156,9 +143,7 @@ export class WorkerDiscoveryService {
     }
 
     if (tasksFound === 0) {
-      this.logger.warn(
-        `${serviceName} has @WorkerClass() but no @WorkerTask() methods.`,
-      );
+      this.logger.warn(`${serviceName} has @WorkerClass() but no @WorkerTask() methods.`);
     }
   }
 
@@ -180,15 +165,10 @@ export class WorkerDiscoveryService {
   }
 }
 
-function findPropertyKey(
-  serviceInstance: unknown,
-  depInstance: unknown,
-): string | undefined {
-  if (!serviceInstance || !depInstance || typeof serviceInstance !== 'object')
-    return undefined;
+function findPropertyKey(serviceInstance: unknown, depInstance: unknown): string | undefined {
+  if (!serviceInstance || !depInstance || typeof serviceInstance !== 'object') return undefined;
   for (const key of Object.getOwnPropertyNames(serviceInstance)) {
-    if ((serviceInstance as Record<string, unknown>)[key] === depInstance)
-      return key;
+    if ((serviceInstance as Record<string, unknown>)[key] === depInstance) return key;
   }
   return undefined;
 }

@@ -1,9 +1,5 @@
 import type { DiscoveredTask } from '../core/worker.interfaces';
-import type {
-  SerializedDep,
-  SerializedMethod,
-  SerializedService,
-} from './worker-container';
+import type { SerializedDep, SerializedMethod, SerializedService } from './worker-container';
 import { WORKER_DEPS_META } from '../decorators/worker-task.decorator';
 
 /**
@@ -22,9 +18,22 @@ import { WORKER_DEPS_META } from '../decorators/worker-task.decorator';
  * that stubs NestJS packages (so decorator calls at file-eval time are
  * silent no-ops) while letting all other imports resolve normally.
  */
-export function serializeForWorker(
-  tasks: DiscoveredTask[],
-): SerializedService[] {
+export function serializeForWorker(tasks: DiscoveredTask[]): SerializedService[] {
+  // Build a one-shot inverted index ctor → filePath. The previous
+  // implementation scanned the entire `require.cache` per dep, which is
+  // O(cache × deps) — pathological on real apps where the cache holds
+  // 5–15k entries. One pass amortises that to O(cache + deps).
+  const ctorToFile = buildCtorIndex();
+  const findFilePath = (ctor: new (...a: unknown[]) => unknown): string => {
+    const cached = ctorToFile.get(ctor);
+    if (cached) return cached;
+    throw new Error(
+      `nestworker: could not find compiled file for "${ctor.name}" in require.cache. ` +
+        `Ensure the class is exported from its module file and the project is ` +
+        `compiled (not running via ts-node) before starting.`,
+    );
+  };
+
   const byService = new Map<
     string,
     { representative: DiscoveredTask; methods: SerializedMethod[] }
@@ -86,30 +95,25 @@ export function serializeForWorker(
 }
 
 /**
- * Locate the compiled .js file for this constructor by scanning require.cache.
- * NestJS loads all providers via require() so every user-defined class will
- * be present in the cache at the time serializeForWorker() is called.
+ * Build a one-shot ctor → filePath index from `require.cache`. Skips getters
+ * to avoid triggering deprecation warnings / side-effectful accessors
+ * (e.g. Express IncomingMessage.protocol). Constructor exports are always
+ * plain value properties, never getters.
  */
-function findFilePath(ctor: new (...args: unknown[]) => unknown): string {
+function buildCtorIndex(): Map<unknown, string> {
+  const index = new Map<unknown, string>();
   for (const [filePath, mod] of Object.entries(require.cache)) {
     if (!mod?.exports || typeof mod.exports !== 'object') continue;
-    // Object.values() triggers getters on prototype-based exports (e.g. Express
-    // IncomingMessage.protocol accesses this.socket which is undefined at scan
-    // time). Iterate keys manually and guard each access with try/catch.
     for (const key of Object.keys(mod.exports)) {
-      // Skip getters entirely — accessing them may trigger deprecation warnings
-      // (e.g. Express req.host) or throw (e.g. IncomingMessage.protocol).
-      // Constructors are always plain value exports, never getters.
       const desc = Object.getOwnPropertyDescriptor(mod.exports, key);
       if (!desc || typeof desc.get === 'function') continue;
-      if (desc.value === ctor) return filePath;
+      const val = desc.value;
+      if (typeof val === 'function' && !index.has(val)) {
+        index.set(val, filePath);
+      }
     }
   }
-  throw new Error(
-    `nestworker: could not find compiled file for "${ctor.name}" in require.cache. ` +
-      `Ensure the class is exported from its module file and the project is ` +
-      `compiled (not running via ts-node) before starting.`,
-  );
+  return index;
 }
 
 function findDepPropertyKey(

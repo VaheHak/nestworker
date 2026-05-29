@@ -40,10 +40,7 @@ class BenchModule {}
 
 function pct(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
-  const idx = Math.min(
-    sorted.length - 1,
-    Math.floor((p / 100) * sorted.length),
-  );
+  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
   return sorted[idx];
 }
 
@@ -64,9 +61,7 @@ async function run(): Promise<void> {
   console.log(`  cold-start: ${cold.toFixed(1)} ms`);
 
   // Warm-up — JIT, MessagePort priming, etc.
-  await Promise.all(
-    Array.from({ length: WARMUP }, () => ws.run('ImageService', METHOD)),
-  );
+  await Promise.all(Array.from({ length: WARMUP }, () => ws.run('ImageService', METHOD)));
 
   // Measured run — uses the cheapest task (cached require) so we measure
   // pool + IPC overhead rather than CPU work.

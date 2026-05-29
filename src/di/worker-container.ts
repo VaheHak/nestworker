@@ -124,26 +124,41 @@ export class WorkerContainer {
    */
   private readonly fileCache = new Map<string, Record<string, unknown>>();
 
+  /**
+   * Shared vm.Context for ALL files loaded by this container instance.
+   * Creating a fresh context per file is ~ms-scale on every cold path and
+   * compounds badly with monorepo apps that load many files; one shared
+   * context keeps decorator-stubbing semantics intact while collapsing the
+   * cold-start cost to a single `vm.createContext` call per worker.
+   *
+   * Per-file bindings (`require`, `module`, `exports`, `__filename`,
+   * `__dirname`) are injected just-in-time by running the file inside a
+   * thin CommonJS wrapper inside this same context.
+   */
+  private sharedContext: vm.Context | undefined;
+
   load(services: SerializedService[]): void {
     for (const svc of services) {
       // Reconstruct each dep from its compiled file + snapshot
       const depsByKey = new Map<string, unknown>();
       for (const dep of svc.deps) {
-        const inst = this.reconstructFromFile(
-          dep.filePath,
-          dep.name,
-          dep.snapshot,
-        );
+        const inst = this.reconstructFromFile(dep.filePath, dep.name, dep.snapshot);
         this.instances.set(dep.name, inst);
         depsByKey.set(dep.propertyKey, inst);
       }
 
       // Allocate the service without calling its constructor — deps are
       // assigned by property key so constructor slot order never matters.
+      //
+      // NOTE on snapshot fidelity: snapshotInstance only copies own enumerable
+      // values (no getters/setters). Deps that rely on prototype-defined
+      // accessors will see plain-value fallbacks in the worker. Document this
+      // when introducing deps with accessor-based public surface.
       const ServiceClass = this.loadClass(svc.filePath, svc.name);
-      const serviceInstance = Object.create(
-        ServiceClass.prototype as object,
-      ) as Record<string, unknown>;
+      const serviceInstance = Object.create(ServiceClass.prototype as object) as Record<
+        string,
+        unknown
+      >;
 
       for (const [key, inst] of depsByKey) {
         serviceInstance[key] = inst;
@@ -165,24 +180,19 @@ export class WorkerContainer {
     snapshot: Record<string, unknown>,
   ): unknown {
     const DepClass = this.loadClass(filePath, className);
-    const instance = Object.create(DepClass.prototype as object) as Record<
-      string,
-      unknown
-    >;
+    const instance = Object.create(DepClass.prototype as object) as Record<string, unknown>;
     Object.assign(instance, snapshot);
     return instance;
   }
 
   /**
-   * Load a named export from a compiled .js file by running it in a vm
-   * context. The context's require() stubs NestJS packages so decorators
-   * at file-eval time are silent no-ops, while all other imports resolve
-   * normally through the real Node module system.
+   * Load a named export from a compiled .js file by running it in the
+   * shared vm context. The context's globals include a `require` shim that
+   * stubs NestJS packages so decorator calls at file-eval time are silent
+   * no-ops, while all other imports resolve normally through Node's real
+   * module system.
    */
-  private loadClass(
-    filePath: string,
-    className: string,
-  ): new (...args: unknown[]) => unknown {
+  private loadClass(filePath: string, className: string): new (...args: unknown[]) => unknown {
     const exports = this.runFile(filePath);
 
     const cls = exports[className];
@@ -195,9 +205,51 @@ export class WorkerContainer {
     return cls as new (...args: unknown[]) => unknown;
   }
 
+  /** Lazy-init the shared context. */
+  private getSharedContext(): vm.Context {
+    if (this.sharedContext) return this.sharedContext;
+    const context = vm.createContext({
+      // Per-file bindings are injected via the CJS wrapper below; we keep
+      // these on the context so files referencing `console`, `process`,
+      // `Buffer`, etc. via the global resolve cheaply.
+      console,
+      process,
+      Buffer,
+      URL,
+      URLSearchParams,
+      fetch,
+      // AbortController/AbortSignal are referenced by emitted TS metadata
+      // (`__metadata("design:paramtypes", [..., AbortSignal])`) whenever a
+      // @WorkerTask method declares an `AbortSignal` parameter. Missing them
+      // here throws `ReferenceError: AbortSignal is not defined` at file
+      // eval time, before any task can run.
+      AbortController,
+      AbortSignal,
+      Event,
+      EventTarget,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      setImmediate,
+      clearImmediate,
+      queueMicrotask,
+      Promise,
+      Reflect: createReflectShim(),
+      global: undefined as unknown,
+    });
+    (context as Record<string, unknown>).global = context;
+    this.sharedContext = context;
+    return context;
+  }
+
   /**
-   * Execute a compiled .js file in an isolated vm context and return its
+   * Execute a compiled .js file in the shared vm context and return its
    * module.exports. Results are cached by file path.
+   *
+   * Files are wrapped in a CommonJS-style function so per-file bindings
+   * (`require`, `module`, `exports`, `__filename`, `__dirname`) don't leak
+   * into the shared context global between files.
    */
   private runFile(filePath: string): Record<string, unknown> {
     const cached = this.fileCache.get(filePath);
@@ -210,46 +262,27 @@ export class WorkerContainer {
     this.fileCache.set(filePath, mod.exports);
 
     const sandboxRequire = this.createSandboxRequire(filePath);
+    const context = this.getSharedContext();
 
-    const context = vm.createContext({
-      require: sandboxRequire,
-      module: mod,
-      exports: mod.exports,
-      __filename: filePath,
-      __dirname: nodePath.dirname(filePath),
-      // Standard globals the compiled output may reference
-      console,
-      process,
-      Buffer,
-      URL,
-      URLSearchParams,
-      fetch,
-      setTimeout,
-      clearTimeout,
-      setInterval,
-      clearInterval,
-      setImmediate,
-      clearImmediate,
-      Promise,
-      Reflect: createReflectShim(),
-      // Make the context's global === the context itself so that
-      // `(this && this.__importStar)` patterns resolve to the context global
-      // rather than to undefined (as they would in new Function()).
-      global: undefined as unknown, // set below after createContext
-    });
-
-    // Wire global → context so self-referential global patterns work
-    (context as Record<string, unknown>).global = context;
-
-    vm.runInContext(source, context, { filename: filePath });
+    // Wrap the file in a CJS-style function — same shape as Node's loader,
+    // but compiled once into our shared context. This keeps per-file
+    // bindings hermetic without paying for a fresh vm.createContext.
+    const wrapped =
+      '(function (exports, require, module, __filename, __dirname) { ' + source + '\n})';
+    const fn = vm.runInContext(wrapped, context, { filename: filePath }) as (
+      exports: unknown,
+      require: unknown,
+      module: unknown,
+      __filename: string,
+      __dirname: string,
+    ) => void;
+    fn(mod.exports, sandboxRequire, mod, filePath, nodePath.dirname(filePath));
 
     this.fileCache.set(filePath, mod.exports);
     return mod.exports;
   }
 
-  private createSandboxRequire(
-    parentFilePath: string,
-  ): (id: string) => unknown {
+  private createSandboxRequire(parentFilePath: string): (id: string) => unknown {
     const parentRequire = nodeModule.createRequire(parentFilePath);
 
     return (id: string): unknown => {
@@ -286,17 +319,12 @@ function createReflectShim(): typeof Reflect {
     metadata?: (...args: unknown[]) => unknown;
   };
 
-  if (typeof shim.getMetadata !== 'function')
-    shim.getMetadata = () => undefined;
-  if (typeof shim.defineMetadata !== 'function')
-    shim.defineMetadata = () => undefined;
-  if (typeof shim.getOwnMetadata !== 'function')
-    shim.getOwnMetadata = () => undefined;
+  if (typeof shim.getMetadata !== 'function') shim.getMetadata = () => undefined;
+  if (typeof shim.defineMetadata !== 'function') shim.defineMetadata = () => undefined;
+  if (typeof shim.getOwnMetadata !== 'function') shim.getOwnMetadata = () => undefined;
   if (typeof shim.hasMetadata !== 'function') shim.hasMetadata = () => false;
-  if (typeof shim.hasOwnMetadata !== 'function')
-    shim.hasOwnMetadata = () => false;
-  if (typeof shim.metadata !== 'function')
-    shim.metadata = () => () => undefined;
+  if (typeof shim.hasOwnMetadata !== 'function') shim.hasOwnMetadata = () => false;
+  if (typeof shim.metadata !== 'function') shim.metadata = () => () => undefined;
 
   return shim as typeof Reflect;
 }

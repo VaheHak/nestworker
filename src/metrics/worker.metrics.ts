@@ -20,10 +20,7 @@ export interface WorkerMetricsSnapshot {
   /** Current busy worker count */
   busyWorkers: number;
   /** Per-task duration histogram (p50, p95, p99) in ms */
-  durations: Record<
-    string,
-    { p50: number; p95: number; p99: number; count: number }
-  >;
+  durations: Record<string, { p50: number; p95: number; p99: number; count: number }>;
 }
 
 /**
@@ -113,12 +110,7 @@ export class WorkerMetricsService implements OnModuleInit, OnModuleDestroy {
 
   /** Reset all counters (useful in tests) */
   reset(): void {
-    this.jobsTotal =
-      this.jobsSuccess =
-      this.jobsFailed =
-      this.jobsTimeout =
-      this.jobsDead =
-        0;
+    this.jobsTotal = this.jobsSuccess = this.jobsFailed = this.jobsTimeout = this.jobsDead = 0;
     this.durationSamples.clear();
   }
 
@@ -142,7 +134,6 @@ function computePercentiles(samples: number[]): {
 } {
   if (samples.length === 0) return { p50: 0, p95: 0, p99: 0, count: 0 };
   const sorted = [...samples].sort((a, b) => a - b);
-  const p = (pct: number) =>
-    sorted[Math.ceil((pct / 100) * sorted.length) - 1] ?? 0;
+  const p = (pct: number) => sorted[Math.ceil((pct / 100) * sorted.length) - 1] ?? 0;
   return { p50: p(50), p95: p(95), p99: p(99), count: samples.length };
 }

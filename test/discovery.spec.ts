@@ -79,9 +79,14 @@ describe('WorkerDiscoveryService', () => {
       expect(def.retry).toBe(2);
       expect(def.retryDelay).toBe(50);
 
-      // function retryDelay collapses to the avg of fn(1..3) = (100+200+300)/3 = 200
+      // function retryDelay is preserved as-is — the pool evaluates it
+      // per-attempt on the main thread, so backoff strategies (e.g.
+      // `(n) => n * 1000`) work correctly.
       const fnDelay = byName.get('withFnDelay')!;
-      expect(fnDelay.retryDelay).toBe(200);
+      expect(typeof fnDelay.retryDelay).toBe('function');
+      expect((fnDelay.retryDelay as (n: number) => number)(1)).toBe(100);
+      expect((fnDelay.retryDelay as (n: number) => number)(2)).toBe(200);
+      expect((fnDelay.retryDelay as (n: number) => number)(3)).toBe(300);
 
       // Proxies are surfaced with a property key and concrete method names
       expect(high.proxyInstances).toHaveLength(1);
